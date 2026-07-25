@@ -4,9 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-**Greenfield — no code exists yet.** This file is the project charter. Once the project is scaffolded, update this file with the actual build/run/test commands and remove this notice.
+The backend is being built in `backend/` (plan: `docs/plans/2026-07-25-001-feat-backend-thin-slices-plan.md`). The frontend does not exist yet.
 
-Shared repo: https://github.com/nathanecunningham/JoshNathanJobBoard (currently just a README). Clone it and move this charter + `docs/` into it before scaffolding, so both collaborators share the context. The tech stack decision and its rationale live in `docs/brainstorms/2026-07-25-tech-stack-requirements.md`.
+**Backend commands** (run from `backend/`):
+- Setup: `uv sync`
+- Dev server: `uv run uvicorn app.main:app --reload` (API docs at http://localhost:8000/docs)
+- Tests: `uv run pytest`
+
+The tech stack decision and its rationale live in `docs/brainstorms/2026-07-25-tech-stack-requirements.md`.
 
 ## What This Project Is
 

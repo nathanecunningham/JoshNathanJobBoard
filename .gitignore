@@ -7,6 +7,9 @@
 *.db
 *.sqlite
 *.sqlite3
+# SQLite WAL-mode sidecar files
+*.db-wal
+*.db-shm
 
 # Python
 __pycache__/

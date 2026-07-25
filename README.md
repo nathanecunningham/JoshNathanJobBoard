@@ -17,6 +17,17 @@ claude
 git clone https://github.com/nathanecunningham/JoshNathanJobBoard.git ~/Documents/JoshNathanJobBoard
 ```
 
+## Backend
+
+The API server lives in [`backend/`](backend/README.md). After a one-time
+`uv sync` in that folder, start it with:
+
+```bash
+cd backend && uv run uvicorn app.main:app --reload
+```
+
+See [backend/README.md](backend/README.md) for setup, tests, and API docs.
+
 ## What's in this repo
 
 - `CLAUDE.md` — project charter: who we are, planned features, and the tech stack we chose
