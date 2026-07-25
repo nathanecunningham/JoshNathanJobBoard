@@ -39,12 +39,13 @@ His portfolio showcases UX design and research (forms engines, admin portals, an
 
 ## Architecture (decided 2026-07-25)
 
-Stack chosen to match the division of labor — Joshua owns the backend in Python, Nathan's prototypes become the frontend via Claude Code. Full rationale in `docs/brainstorms/2026-07-25-tech-stack-requirements.md`.
+Stack chosen to match the division of labor — Nathan is the ideas guy (prototypes, wire diagrams, and board exports in `ideas/`), and Joshua builds both halves of the app with Claude Code. Full rationale in `docs/brainstorms/2026-07-25-tech-stack-requirements.md` (note: that doc predates the role change; roles here are current).
 
 - **Backend (`backend/`, Joshua's domain):** FastAPI + SQLite. All job-search, resume, and AI logic. The auto-generated API docs are the reference for what data exists.
-- **Frontend (`frontend/`, Nathan's domain):** React + Vite + TypeScript + Tailwind CSS + shadcn/ui, implemented from Nathan's Axure/Figma prototypes by Claude Code. Keep it conventional — no clever architecture.
+- **Frontend (`frontend/`, Joshua's domain):** React + Vite + TypeScript + Tailwind CSS + shadcn/ui, implemented by Joshua + Claude Code from Nathan's Axure/Figma prototypes. Keep it conventional — no clever architecture.
+- **Ideas (`ideas/`, Nathan's domain):** prototypes, wire diagrams, Miro board exports, and notes. This is Nathan's only lane in the repo; he doesn't touch code.
 - **Claude API** — powers resume parsing, keyword tailoring, and matching job postings to experience.
-- **Collaboration seam:** the JSON API contract. Nathan's Claude Code sessions stay scoped to `frontend/`; prototype handoffs must cover every screen state, the data fields per screen, and a component inventory — his screens define the schema.
+- **Collaboration seam:** Nathan's prototypes in `ideas/`. Handoffs should cover every screen state, the data fields per screen, and a component inventory — his screens define the schema, and Joshua + Claude implement both halves from them.
 
 Key data-model relationships to preserve whatever the final schema looks like:
 
