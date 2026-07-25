@@ -244,6 +244,26 @@ class JobLinkRead(JobLinkBase):
     job_id: int
 
 
+class JobListRow(JobRead):
+    """One row of ``GET /jobs`` — everything Nathan's board row needs in a
+    single call, with no follow-up requests. The derived fields are computed
+    by the jobs router's list query."""
+
+    # Latest of the job's own updated_at and its newest comment.
+    last_activity_at: datetime
+    comment_count: int
+    contact_count: int
+    link_count: int
+
+
+class JobDetail(JobRead):
+    """``GET /jobs/{id}`` — the job plus its nested sub-resources."""
+
+    comments: list[CommentRead] = Field(default_factory=list)
+    contacts: list[ContactRead] = Field(default_factory=list)
+    links: list[JobLinkRead] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Master resume
 # ---------------------------------------------------------------------------
