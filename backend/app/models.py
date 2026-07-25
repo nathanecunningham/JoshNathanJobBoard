@@ -453,3 +453,47 @@ class ExperienceSource(SQLModel, table=True):
     type: ExperienceSourceType
     content: str | None = None
     url: str | None = None
+
+
+class ConfigProfileRead(SQLModel):
+    """``GET /settings/profile`` — the singleton row, no internal id."""
+
+    experience: str | None
+    location: str | None
+    pay_min: int | None
+
+
+class ConfigProfileUpdate(SQLModel):
+    """``PUT /settings/profile`` body — a full replacement (PUT semantics):
+    omitted fields become null, they are not preserved."""
+
+    experience: str | None = None
+    location: str | None = None
+    pay_min: int | None = None
+
+
+class ExperienceSourceCreate(SQLModel):
+    type: ExperienceSourceType
+    content: str | None = None
+    url: str | None = None
+
+
+class ExperienceSourceRead(SQLModel):
+    id: int
+    type: ExperienceSourceType
+    content: str | None
+    url: str | None
+
+
+class RefreshSummary(SQLModel):
+    """``POST /recommendations/refresh`` response — what one press did.
+
+    ``remaining_quota`` is the provider's remaining monthly request count
+    (from RapidAPI rate-limit headers); None when the provider didn't report
+    one.
+    """
+
+    inserted: int
+    skipped_duplicates: int
+    unscored: int
+    remaining_quota: int | None = None

@@ -18,14 +18,15 @@ import base64
 import json
 
 import anthropic
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.config import get_settings
 
-# Sonnet for parsing/tailoring per the plan's AI cost model (Haiku is for
-# match scoring, which arrives with U6).
+# Sonnet for parsing/tailoring, Haiku for high-volume match scoring — per the
+# plan's AI cost model.
 PARSE_MODEL = "claude-sonnet-5"
 TAILOR_MODEL = "claude-sonnet-5"
+SCORE_MODEL = "claude-haiku-4-5"
 
 
 class AIUnavailableError(Exception):
@@ -70,6 +71,13 @@ class TailoringResult(BaseModel):
     sections: list[TailoredContent]
 
 
+class MatchScore(BaseModel):
+    """Structured-output schema for match scoring (U6)."""
+
+    score: int = Field(ge=0, le=100)
+    rationale: str
+
+
 def wrap_untrusted(text: str, label: str) -> str:
     """Delimit untrusted external text as data-not-instructions.
 
@@ -95,6 +103,15 @@ _PARSE_INSTRUCTIONS = (
     "- Give each section a short descriptive name (for experience entries, "
     "use the employer/position) and return the sections in the order they "
     "appear in the resume."
+)
+
+
+_SCORE_INSTRUCTIONS = (
+    "Rate how well this candidate matches the job posting.\n"
+    "- Return an integer score from 0 (no overlap) to 100 (ideal match) and "
+    "a one-sentence rationale a job seeker can read at a glance.\n"
+    "- Judge only from the experience profile and the posting text; do not "
+    "assume skills or experience that are not listed."
 )
 
 
@@ -230,3 +247,56 @@ def tailor_sections(
             f"got {sorted(returned_ids)})."
         )
     return result.sections
+
+
+def score_job(
+    profile: str, company: str, position: str, description: str
+) -> MatchScore:
+    """Score one job posting (0-100 + one-sentence rationale) against the
+    candidate's experience profile.
+
+    The profile block is identical across every job in a refresh, so it
+    carries ``cache_control`` to prompt-cache it; the posting block varies
+    per call and comes after. (Haiku 4.5's minimum cacheable prefix is 4096
+    tokens, so a small profile silently won't cache — harmless, per the
+    plan's FYI.) Job postings come from the open web, so both blocks are
+    embedded as untrusted data. Network I/O happens here — callers must
+    invoke this BEFORE opening any database transaction.
+    """
+    job_text = f"Company: {company}\nPosition: {position}\n\n{description}"
+    content = [
+        {
+            "type": "text",
+            "text": (
+                _SCORE_INSTRUCTIONS
+                + "\n\nThe candidate's experience profile:\n"
+                + wrap_untrusted(profile, "experience_profile")
+            ),
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": (
+                "The job posting to score:\n"
+                + wrap_untrusted(job_text, "job_posting")
+            ),
+        },
+    ]
+
+    client = _build_client()
+    try:
+        response = client.messages.parse(
+            model=SCORE_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": content}],
+            output_format=MatchScore,
+        )
+    except anthropic.APIError as exc:
+        raise AIParseError(f"Claude request failed: {exc}") from exc
+    except ValidationError as exc:
+        raise AIParseError(f"Claude returned malformed output: {exc}") from exc
+
+    result = response.parsed_output
+    if result is None:
+        raise AIParseError("Claude returned no match score.")
+    return result

@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.db import get_session
-from app.routers import jobs, resume, tailor
+from app.routers import jobs, recommendations, resume, settings, tailor
 
 
 def create_app() -> FastAPI:
@@ -19,6 +19,8 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(resume.router)
     app.include_router(tailor.router)
+    app.include_router(recommendations.router)
+    app.include_router(settings.router)
 
     # Allow the Vite dev server (Nathan's frontend) to call this API.
     app.add_middleware(

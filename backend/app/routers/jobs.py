@@ -229,6 +229,38 @@ def delete_job(job_id: int, session: Session = Depends(get_session)) -> None:
     session.commit()
 
 
+@router.post("/{job_id}/dismiss", response_model=JobRead)
+def dismiss_job(job_id: int, session: Session = Depends(get_session)) -> Job:
+    """Hide a job from the default list (recommendation-lifecycle action).
+
+    Dismissal is a timestamp, not a status — the pipeline is untouched and
+    the row stays in the dedup set, so a future refresh can't re-import the
+    posting. Idempotent: dismissing an already-dismissed job keeps the
+    original timestamp.
+    """
+    job = get_job_or_404(job_id, session)
+    if job.dismissed_at is None:
+        job.dismissed_at = utcnow()
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+    return job
+
+
+@router.post("/{job_id}/restore", response_model=JobRead)
+def restore_job(job_id: int, session: Session = Depends(get_session)) -> Job:
+    """Clear a dismissal — the job reappears in the default list."""
+    job = get_job_or_404(job_id, session)
+    if job.dismissed_at is not None:
+        job.dismissed_at = None
+        job.updated_at = utcnow()
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+    return job
+
+
 # ---------------------------------------------------------------------------
 # Comments
 # ---------------------------------------------------------------------------
