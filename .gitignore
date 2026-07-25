@@ -20,3 +20,6 @@ dist/
 
 # OS / editor
 .DS_Store
+
+# Compound Engineering — personal settings stay local, the .example file is shared
+.compound-engineering/*.local.yaml
