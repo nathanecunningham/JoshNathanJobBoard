@@ -278,6 +278,34 @@ class ResumeSection(SQLModel, table=True):
     position: int
 
 
+class ResumeSectionRead(SQLModel):
+    id: int
+    name: str
+    content: str
+    position: int
+
+
+class ResumeSectionUpdate(SQLModel):
+    """PATCH body — everything optional; only provided fields change."""
+
+    name: str | None = None
+    content: str | None = None
+    position: int | None = None
+
+
+class ResumeRead(SQLModel):
+    """``GET /resume`` — the whole master; ``sections`` is [] before any
+    import (first-run contract for Nathan's screen, never a 404)."""
+
+    sections: list[ResumeSectionRead] = Field(default_factory=list)
+
+
+class ResumeImportText(SQLModel):
+    """Body of ``POST /resume/import/text``; empty text is a 422."""
+
+    text: str = Field(min_length=1)
+
+
 class MasterSnapshot(SQLModel, table=True):
     """A retained copy of the outgoing master, taken on re-import (U4)."""
 
@@ -297,6 +325,29 @@ class MasterSnapshotSection(SQLModel, table=True):
     position: int
 
     snapshot: MasterSnapshot = Relationship(back_populates="sections")
+
+
+class MasterSnapshotSectionRead(SQLModel):
+    id: int
+    name: str
+    content: str
+    position: int
+
+
+class MasterSnapshotSummary(SQLModel):
+    """One row of ``GET /resume/snapshots``."""
+
+    id: int
+    created_at: datetime
+    section_count: int
+
+
+class MasterSnapshotDetail(SQLModel):
+    """``GET /resume/snapshots/{id}`` — full retained content, read-only."""
+
+    id: int
+    created_at: datetime
+    sections: list[MasterSnapshotSectionRead] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
