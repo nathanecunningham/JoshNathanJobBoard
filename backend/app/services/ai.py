@@ -15,6 +15,7 @@ be able to steer the model.
 """
 
 import base64
+import json
 
 import anthropic
 from pydantic import BaseModel, ValidationError
@@ -24,6 +25,7 @@ from app.config import get_settings
 # Sonnet for parsing/tailoring per the plan's AI cost model (Haiku is for
 # match scoring, which arrives with U6).
 PARSE_MODEL = "claude-sonnet-5"
+TAILOR_MODEL = "claude-sonnet-5"
 
 
 class AIUnavailableError(Exception):
@@ -45,6 +47,27 @@ class ParsedResume(BaseModel):
     """Structured-output schema for resume parsing: sections in order."""
 
     sections: list[ParsedSection]
+
+
+class SectionToTailor(BaseModel):
+    """One master-section snapshot handed to the model for rewriting."""
+
+    id: int
+    name: str
+    content: str
+
+
+class TailoredContent(BaseModel):
+    """Rewritten content for one section, keyed back by the section's id."""
+
+    section_id: int
+    content: str
+
+
+class TailoringResult(BaseModel):
+    """Structured-output schema for tailoring: one entry per input section."""
+
+    sections: list[TailoredContent]
 
 
 def wrap_untrusted(text: str, label: str) -> str:
@@ -75,13 +98,26 @@ _PARSE_INSTRUCTIONS = (
 )
 
 
+_TAILOR_INSTRUCTIONS = (
+    "Rewrite the resume sections below so their wording aligns with the "
+    "keywords and emphasis of the job posting.\n"
+    "- Rewrite ONLY the sections provided, and return rewritten content for "
+    "each one, keyed by its id.\n"
+    "- Stay truthful to the original content: never invent experience, "
+    "skills, employers, dates, or accomplishments that are not already "
+    "there. Reframing and re-emphasizing is fine; fabricating is not.\n"
+    "- Preserve the person's voice and tone — the result should read like "
+    "the same person wrote it."
+)
+
+
 def _build_client() -> anthropic.Anthropic:
     """Create an Anthropic client, or fail clearly when no key is set."""
     settings = get_settings()
     if not settings.anthropic_api_key:
         raise AIUnavailableError(
             "No Anthropic API key is configured. Add ANTHROPIC_API_KEY to "
-            "backend/.env to enable resume import."
+            "backend/.env to enable AI features (resume import, tailoring)."
         )
     return anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
@@ -142,3 +178,55 @@ def parse_resume(
     if parsed is None or not parsed.sections:
         raise AIParseError("Claude returned no resume sections.")
     return parsed.sections
+
+
+def tailor_sections(
+    job_description: str, sections: list[SectionToTailor]
+) -> list[TailoredContent]:
+    """Rewrite the given master-section snapshots against a job description.
+
+    Returns one :class:`TailoredContent` per input section — the caller maps
+    them back by ``section_id``. Both the job description (open-web text) and
+    the resume sections are embedded as untrusted data. Network I/O happens
+    here — callers must invoke this BEFORE opening any database transaction
+    (same rule as :func:`parse_resume`).
+    """
+    if not sections:
+        raise ValueError("sections must not be empty")
+
+    sections_json = json.dumps(
+        [section.model_dump() for section in sections], indent=2
+    )
+    prompt = (
+        _TAILOR_INSTRUCTIONS
+        + "\n\nThe job posting to align with:\n"
+        + wrap_untrusted(job_description, "job_description")
+        + "\n\nThe sections to rewrite:\n"
+        + wrap_untrusted(sections_json, "resume_sections")
+    )
+
+    client = _build_client()
+    try:
+        response = client.messages.parse(
+            model=TAILOR_MODEL,
+            max_tokens=16000,
+            messages=[{"role": "user", "content": prompt}],
+            output_format=TailoringResult,
+        )
+    except anthropic.APIError as exc:
+        raise AIParseError(f"Claude request failed: {exc}") from exc
+    except ValidationError as exc:
+        raise AIParseError(f"Claude returned malformed output: {exc}") from exc
+
+    result = response.parsed_output
+    if result is None:
+        raise AIParseError("Claude returned no tailored sections.")
+    returned_ids = {item.section_id for item in result.sections}
+    expected_ids = {section.id for section in sections}
+    if returned_ids != expected_ids:
+        raise AIParseError(
+            "Claude's rewritten sections don't match the requested ones "
+            f"(expected ids {sorted(expected_ids)}, "
+            f"got {sorted(returned_ids)})."
+        )
+    return result.sections

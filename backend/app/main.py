@@ -11,13 +11,14 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.db import get_session
-from app.routers import jobs, resume
+from app.routers import jobs, resume, tailor
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Job Board API")
     app.include_router(jobs.router)
     app.include_router(resume.router)
+    app.include_router(tailor.router)
 
     # Allow the Vite dev server (Nathan's frontend) to call this API.
     app.add_middleware(

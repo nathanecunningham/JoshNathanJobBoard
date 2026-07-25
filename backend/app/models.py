@@ -388,6 +388,49 @@ class TailoredSection(SQLModel, table=True):
     tailored_resume: TailoredResume = Relationship(back_populates="sections")
 
 
+class TailorRequest(SQLModel):
+    """Body of ``POST /jobs/{id}/tailor``. ``section_ids`` picks which master
+    sections Claude rewrites (empty is a 422); ``description_override`` lets
+    the user paste a posting when the job has none stored (and wins over the
+    stored one when both exist)."""
+
+    section_ids: list[int] = Field(min_length=1)
+    description_override: str | None = None
+
+
+class TailoredSectionRead(SQLModel):
+    id: int
+    base_section_id: int | None  # provenance only; NULL after re-import
+    name: str
+    position: int
+    content: str
+    changed: bool
+
+
+class TailoredSectionUpdate(SQLModel):
+    """PATCH body — everything optional; only provided fields change."""
+
+    name: str | None = None
+    content: str | None = None
+    position: int | None = None
+
+
+class TailoredResumeRead(SQLModel):
+    """A full tailored copy — self-contained, renders with no master reads."""
+
+    id: int
+    job_id: int
+    is_submitted: bool
+    created_at: datetime
+    sections: list[TailoredSectionRead] = Field(default_factory=list)
+
+
+class TailoredResumeUpdate(SQLModel):
+    """PATCH body — the submitted flag is the only mutable field."""
+
+    is_submitted: bool
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
