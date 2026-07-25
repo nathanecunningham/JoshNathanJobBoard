@@ -2,82 +2,62 @@
 
 For Josh and Nathan. One of us is brand new to git and the other is a novice, so this guide favors simple, repeatable habits over git wizardry. When in doubt, ask Claude Code to do the git steps for you — that's a legitimate way to work, and how we both learn.
 
+## The Short Version
+
+We both work directly on the `main` branch. No feature branches, no pull requests. Instead of branches keeping our work separate, **our lanes do**: Josh works in `backend/`, Nathan works in `frontend/`. Pull before you start, commit as you go, push when something works.
+
 ## Core Principles
 
-1. **`main` always works.** The `main` branch is the shared, working version of the project. Nobody edits it directly — changes arrive only by merging pull requests. If `main` is ever broken, fixing it is the top priority.
-2. **All work happens on branches.** A branch is a private sandbox copied from `main`. You can commit half-finished, broken, experimental work there without affecting anyone.
-3. **Every contribution goes through a pull request (PR).** No exceptions, even tiny ones — one consistent rule is easier than judgment calls. A PR is a proposal to merge your branch into `main`, and it gives the other person a chance to see what changed.
-4. **Pull before you start.** Always sync your local `main` with GitHub before creating a new branch, so you build on the latest version.
-5. **Small and often beats big and rare.** Short-lived branches (hours or days, not weeks) with focused changes merge easily. Giant branches cause merge conflicts.
-6. **Never commit secrets or personal data.** API keys go in `.env` files and job-search data lives in local database files — both are git-ignored. If it would be bad on a public webpage, it doesn't get committed.
-7. **Stay in your lane, visit politely.** Josh owns `backend/`, Nathan owns `frontend/` (see `CLAUDE.md`). You *can* change anything, but if a PR touches the other person's half, ask them to review it before merging.
+1. **Stay in your lane.** Josh owns `backend/`, Nathan owns `frontend/` (see `CLAUDE.md`). Since we edit different folders, our changes almost never collide — that's what makes the no-branches workflow safe. If you need to change something in the other person's half or in shared files (`README.md`, `CLAUDE.md`, docs), give them a heads-up first.
+2. **Pull before you start.** Always run `git pull` before working, so you build on the other person's latest changes instead of colliding with them.
+3. **Push working code.** `main` is the shared version of the project, so push when the thing you were doing works — not mid-experiment with the app broken. If you do accidentally push something broken, that's fixable; just tell the other person and fix it as the next priority.
+4. **Small and often beats big and rare.** Commit and push in small pieces, at least at the end of each work session. The longer your local copy drifts from GitHub, the messier the eventual sync.
+5. **Never commit secrets or personal data.** API keys go in `.env` files and job-search data lives in local database files — both are git-ignored. If it would be bad on a public webpage, it doesn't get committed.
 
 ## The Workflow Loop
 
-This is the cycle for every piece of work, however small. Claude Code can run any or all of these steps — just describe what you want.
+This is the cycle for every work session. Claude Code can run any or all of these steps — just describe what you want.
 
-**1. Sync up:**
+**1. Sync up before you start:**
 ```bash
-git checkout main
 git pull
 ```
 
-**2. Create a branch** named `<yourname>/<what-it-does>`:
-```bash
-git checkout -b josh/application-tracker-api     # Josh's example
-git checkout -b nathan/dashboard-layout          # Nathan's example
-```
-
-**3. Work and commit as you go.** A commit is a saved checkpoint. Commit whenever something coherent works:
+**2. Work and commit as you go.** A commit is a saved checkpoint. Commit whenever something coherent works:
 ```bash
 git add -A
 git commit -m "Add status field to application cards"
 ```
 Write commit messages as short commands: "Add X", "Fix Y", "Update Z".
 
-**4. Push your branch to the shared repo:**
+**3. Push your changes to the shared repo:**
 ```bash
-git push -u origin josh/application-tracker-api
+git push
 ```
 
-**5. Open a pull request** (easiest with the GitHub CLI, or the yellow banner on the repo page):
-```bash
-gh pr create --fill
-```
-In the description, say what changed and why in a sentence or two.
-
-**6. Review and merge.**
-- If your PR touches the other person's half of the app, or you want feedback: ask them to look before merging.
-- If it's clearly within your own area: you may merge your own PR.
-- Merge using the **"Squash and merge"** button on GitHub. This combines your branch's commits into one tidy commit on `main`, which keeps history readable.
-- After merging, click **"Delete branch"** when GitHub offers.
-
-**7. Everyone syncs:** next time either of us starts work, step 1 picks up the merged changes automatically.
+That's it. Next time either of us runs `git pull`, we get each other's work automatically.
 
 ## When Git Fights Back
 
-**"Your branch is behind / push rejected."** Someone merged to `main` since you started. Run `git pull` on your branch — git usually merges automatically.
+**"Your branch is behind / push rejected."** The other person pushed since you last pulled. Run `git pull` — git usually merges automatically because we work in different folders — then `git push` again.
 
-**Merge conflict.** Git found overlapping edits and needs a human to choose. The files will contain markers like `<<<<<<<`. Don't panic and don't guess — this is a great moment to ask Claude Code: *"I have a merge conflict, help me resolve it."* Conflicts are normal and fixable; nothing is lost.
+**Merge conflict.** Git found overlapping edits and needs a human to choose. The files will contain markers like `<<<<<<<`. Don't panic and don't guess — this is a great moment to ask Claude Code: *"I have a merge conflict, help me resolve it."* Conflicts are normal and fixable; nothing is lost. (If we stay in our lanes, these should be rare.)
 
 **"I committed something I shouldn't have"** (a secret, a database file, a mistake). Stop — don't try to fix history yourself. Tell the other person and ask Claude Code for help. If a secret (API key) was pushed to GitHub, treat it as exposed: revoke/rotate the key first, then clean up.
 
 ## Never Do These
 
-- Never run `git push --force` on `main` or on the other person's branch. Force-pushing rewrites shared history and can destroy work.
-- Never commit directly to `main`, even for "just a typo." Branch + PR, always.
+- Never run `git push --force`. Force-pushing rewrites shared history and can destroy the other person's work.
 - Never commit `.env` files, database files, or anything with real resume/application data. The `.gitignore` protects you, but don't fight it.
-- Never delete a branch that isn't yours without asking.
+- Never edit the other person's half of the app without telling them first.
 
 ## Cheat Sheet
 
 | I want to... | Command |
 |---|---|
-| Get the latest shared code | `git checkout main && git pull` |
-| Start a new piece of work | `git checkout -b myname/thing` |
+| Get the latest shared code | `git pull` |
 | Save a checkpoint | `git add -A && git commit -m "Do thing"` |
-| Share my branch | `git push -u origin myname/thing` |
-| Propose merging it | `gh pr create --fill` |
+| Share my work | `git push` |
 | See what state I'm in | `git status` |
 
-Or ask Claude Code in plain English — "start a new branch for the login page," "commit this and open a PR" — and it will run the right commands.
+Or ask Claude Code in plain English — "commit and push my changes," "pull Nathan's latest work" — and it will run the right commands.
