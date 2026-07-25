@@ -86,7 +86,7 @@ Josh and Nathan are both on the job market and need one place to run a job searc
 
 ## Dependencies / Assumptions
 
-- Claude API key available for matching and tailoring (billing on Josh's account — unverified assumption, carried from tech-stack doc).
+- Claude API key available for matching and tailoring — resolved 2026-07-25: each user funds their own pay-as-you-go key (~$5 lasts months); Claude subscriptions can't power API calls. Details in the backend doc's AI Cost Model.
 - "Webpages" as an experience source means user-provided URLs (e.g., portfolio pages) the engine can read — assumed, not spelled out on the board.
 
 ---

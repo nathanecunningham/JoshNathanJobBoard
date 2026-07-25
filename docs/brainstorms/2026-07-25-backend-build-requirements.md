@@ -62,6 +62,19 @@ How `backend/` gets built to serve the features in `2026-07-25-app-features-requ
 - **Free jobs API over scraping or manual-only:** real auto-population from day one without ToS risk; provider swap stays cheap behind one fetch service.
 - **Structured sections over document blobs:** section-level tailoring (board: "defining which section will change") and the visual builder need addressable sections; parsing happens once at import instead of on every tailor.
 - **Tracker must work without AI (R5/R6 standalone):** keeps the daily-use anchor immune to API limits, key problems, or provider changes.
+- **AI billing: each user's own Claude API key, pay-as-you-go (decided 2026-07-25):** Claude Pro/Max subscriptions cannot power the app's API calls — Anthropic bills API usage separately, and using subscription login tokens from third-party apps is against their terms. Each of us creates a developer account at console.anthropic.com, buys the $5 minimum credit block, and puts the key in our local `.env`.
+
+---
+
+## AI Cost Model
+
+Estimated per-action costs (Haiku 4.5 for scoring, Sonnet for tailoring; API prices as of 2026-07):
+
+- Parse master resume (rare): ~3–5¢
+- Tailor a resume for one job: ~1–4¢
+- Score one job against the profile: ~0.3¢ → a 50-job refresh ≈ 15–20¢
+
+Expected monthly spend: **~$1.50–3 for an active daily search**, ~$5–8 for heavy use. A $5 credit block should last months. Three cost levers are already in the requirements: refresh is a manual button (R9, no background scheduler), dedup means already-seen jobs are never re-scored (R9), and prompt-caching the experience profile cuts repeat input costs ~90%. If AI features go unused, cost is $0. Check the console.anthropic.com usage dashboard after the first week of real use to confirm the burn rate.
 
 ---
 
