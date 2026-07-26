@@ -23,10 +23,12 @@ Invariants from the plan:
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.db import get_session
 from app.models import (
+    Job,
     ResumeSection,
     TailoredResume,
     TailoredResumeRead,
@@ -36,19 +38,10 @@ from app.models import (
     TailoredSectionUpdate,
     TailorRequest,
 )
-from app.routers.jobs import get_job_or_404
+from app.routers._shared import get_or_404
 from app.services import ai
 
 router = APIRouter(tags=["tailored"])
-
-
-def get_tailored_or_404(tailored_id: int, session: Session) -> TailoredResume:
-    tailored = session.get(TailoredResume, tailored_id)
-    if tailored is None:
-        raise HTTPException(
-            status_code=404, detail=f"Tailored resume {tailored_id} not found"
-        )
-    return tailored
 
 
 def _read_shape(tailored: TailoredResume) -> TailoredResumeRead:
@@ -77,7 +70,7 @@ def tailor_resume(
     the pasted override); every other master section is snapshotted verbatim,
     so the copy is complete and self-contained.
     """
-    job = get_job_or_404(job_id, session)
+    job = get_or_404(session, Job, job_id, "Job")
 
     description = body.description_override or job.description
     if not description:
@@ -117,6 +110,15 @@ def tailor_resume(
         raise HTTPException(status_code=502, detail=str(exc))
     rewritten_by_id = {item.section_id: item.content for item in rewritten}
 
+    # The master may have changed while the AI call ran (e.g. a concurrent
+    # re-import deleted sections). The snapshot content in memory is still
+    # complete, so nothing is lost — but a base_section_id pointing at a
+    # vanished row would violate the FK. Re-check which ids still exist and
+    # record provenance as None for the ones that are gone.
+    surviving_ids = set(
+        session.exec(select(ResumeSection.id)).all()
+    )
+
     tailored = TailoredResume(job_id=job.id)
     session.add(tailored)
     session.flush()  # assigns tailored.id for the section rows below
@@ -125,14 +127,25 @@ def tailor_resume(
         session.add(
             TailoredSection(
                 tailored_resume_id=tailored.id,
-                base_section_id=section.id,
+                base_section_id=(
+                    section.id if section.id in surviving_ids else None
+                ),
                 name=section.name,
                 position=section.position,
                 content=new_content if new_content is not None else section.content,
                 changed=new_content is not None,
             )
         )
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # Belt-and-braces: the master changed again between the re-check
+        # above and the commit. Nothing was written; ask the user to retry.
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="master resume changed during tailoring; retry",
+        )
     session.refresh(tailored)
     return _read_shape(tailored)
 
@@ -142,7 +155,7 @@ def list_tailored(
     job_id: int, session: Session = Depends(get_session)
 ) -> list[TailoredResumeRead]:
     """All tailored copies for a job, oldest first. 200 [] when none."""
-    job = get_job_or_404(job_id, session)
+    job = get_or_404(session, Job, job_id, "Job")
     copies = sorted(job.tailored_resumes, key=lambda t: t.id)
     return [_read_shape(tailored) for tailored in copies]
 
@@ -151,7 +164,7 @@ def list_tailored(
 def read_tailored(
     tailored_id: int, session: Session = Depends(get_session)
 ) -> TailoredResumeRead:
-    return _read_shape(get_tailored_or_404(tailored_id, session))
+    return _read_shape(get_or_404(session, TailoredResume, tailored_id, "Tailored resume"))
 
 
 @router.patch("/tailored/{tailored_id}", response_model=TailoredResumeRead)
@@ -165,7 +178,7 @@ def update_tailored(
     Setting it clears the flag on the job's other copies in the same
     transaction — at most one submitted copy per job, enforced here.
     """
-    tailored = get_tailored_or_404(tailored_id, session)
+    tailored = get_or_404(session, TailoredResume, tailored_id, "Tailored resume")
     if body.is_submitted:
         siblings = session.exec(
             select(TailoredResume)
@@ -197,7 +210,7 @@ def update_tailored_section(
     Only ever touches the tailored copy; the master section it came from is
     never written.
     """
-    get_tailored_or_404(tailored_id, session)
+    get_or_404(session, TailoredResume, tailored_id, "Tailored resume")
     section = session.get(TailoredSection, section_id)
     if section is None or section.tailored_resume_id != tailored_id:
         raise HTTPException(
@@ -224,7 +237,7 @@ def delete_tailored(
     Refused (409) for a submitted copy — it records what was actually sent
     with the application.
     """
-    tailored = get_tailored_or_404(tailored_id, session)
+    tailored = get_or_404(session, TailoredResume, tailored_id, "Tailored resume")
     if tailored.is_submitted:
         raise HTTPException(
             status_code=409,

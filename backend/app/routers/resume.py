@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlmodel import Session, select
 
 from app.db import get_session
+from app.routers._shared import get_or_404
 from app.models import (
     MasterSnapshot,
     MasterSnapshotDetail,
@@ -163,11 +164,7 @@ def list_snapshots(
 def read_snapshot(
     snapshot_id: int, session: Session = Depends(get_session)
 ) -> MasterSnapshotDetail:
-    snapshot = session.get(MasterSnapshot, snapshot_id)
-    if snapshot is None:
-        raise HTTPException(
-            status_code=404, detail=f"Snapshot {snapshot_id} not found"
-        )
+    snapshot = get_or_404(session, MasterSnapshot, snapshot_id, "Snapshot")
     sections = sorted(snapshot.sections, key=lambda s: s.position)
     return MasterSnapshotDetail(
         id=snapshot.id,
@@ -185,11 +182,7 @@ def update_section(
     session: Session = Depends(get_session),
 ) -> ResumeSection:
     """Manual edit of one master section (name, content, or position)."""
-    section = session.get(ResumeSection, section_id)
-    if section is None:
-        raise HTTPException(
-            status_code=404, detail=f"Resume section {section_id} not found"
-        )
+    section = get_or_404(session, ResumeSection, section_id, "Resume section")
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(section, field, value)
     session.add(section)

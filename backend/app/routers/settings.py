@@ -7,10 +7,11 @@ the v1 recommendation engine reads only ``resume`` and ``manual`` (asserted
 in tests), the others are stored for later slices.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
 from app.db import get_session
+from app.routers._shared import get_or_404
 from app.models import (
     ConfigProfile,
     ConfigProfileRead,
@@ -76,10 +77,8 @@ def create_source(
 def delete_source(
     source_id: int, session: Session = Depends(get_session)
 ) -> None:
-    source = session.get(ExperienceSource, source_id)
-    if source is None:
-        raise HTTPException(
-            status_code=404, detail=f"Experience source {source_id} not found"
-        )
+    source = get_or_404(
+        session, ExperienceSource, source_id, "Experience source"
+    )
     session.delete(source)
     session.commit()

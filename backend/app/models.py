@@ -11,16 +11,18 @@ Conventions:
   plain, directly editable columns. Auto-setting them when a status change
   arrives is the jobs router's job (U3), not the model's — same for
   ``updated_at`` maintenance.
-- Schemas for the resume/config endpoints arrive with their routers (U4–U6);
-  only the tracker shapes (Job + sub-resources) are defined here.
+- API schemas for every domain (tracker, resume, tailoring, recommendations,
+  config) live in this module, grouped under the section banners below.
 """
 
 import hashlib
 import re
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Annotated
 from urllib.parse import urlparse
 
+from pydantic import PlainSerializer, field_validator
 from sqlalchemy import Index, text
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -30,8 +32,27 @@ def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+# Datetimes are stored naive-UTC in SQLite (see module docstring), but the
+# JSON wire format should say so explicitly. This annotated type serializes
+# to an ISO 8601 string with a "Z" suffix — used on the Read/response
+# schemas only, so SQLModel's column inference on table classes stays on
+# plain ``datetime``.
+UTCDateTime = Annotated[
+    datetime,
+    PlainSerializer(
+        lambda v: v.replace(tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+        return_type=str,
+        when_used="json",
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 # Enums
+#
+# Deliberate v1 choice: enum validity is enforced at the ORM/API layer only.
+# The DB stores these as plain VARCHAR (no CHECK constraint) — see the note
+# in alembic/versions/0001_initial_schema.py.
 # ---------------------------------------------------------------------------
 
 
@@ -100,6 +121,18 @@ def compute_dedup_hash(
 # ---------------------------------------------------------------------------
 
 
+def _to_naive_utc(value: datetime | None) -> datetime | None:
+    """Normalize client-supplied datetimes to naive UTC before storage.
+
+    SQLite's bind processing silently drops timezone offsets, so an aware
+    input like ``09:30+05:00`` would otherwise be stored as ``09:30`` and
+    later served as ``09:30Z`` — an instant that is hours wrong.
+    """
+    if value is not None and value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
 class JobBase(SQLModel):
     """Fields shared by the Job table, Create body, and Read response."""
 
@@ -112,6 +145,11 @@ class JobBase(SQLModel):
     applied_at: datetime | None = None
     denied_at: datetime | None = None
     accepted_at: datetime | None = None
+
+    @field_validator("applied_at", "denied_at", "accepted_at", mode="after")
+    @classmethod
+    def _normalize_dates(cls, value: datetime | None) -> datetime | None:
+        return _to_naive_utc(value)
 
 
 class Job(JobBase, table=True):
@@ -158,15 +196,24 @@ class JobCreate(JobBase):
 class JobRead(JobBase):
     id: int
     source: JobSource
-    dismissed_at: datetime | None = None
+    # Datetime overrides so JSON responses carry an explicit UTC "Z" marker.
+    applied_at: UTCDateTime | None = None
+    denied_at: UTCDateTime | None = None
+    accepted_at: UTCDateTime | None = None
+    dismissed_at: UTCDateTime | None = None
     match_score: float | None = None
     match_rationale: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
 
 
 class JobUpdate(SQLModel):
-    """PATCH body — everything optional; only provided fields change."""
+    """PATCH body — everything optional; only provided fields change.
+
+    ``company``/``position``/``status`` are non-nullable columns, so an
+    explicit JSON ``null`` for them is rejected as a 422 (not a 500 at
+    commit time).
+    """
 
     company: str | None = None
     position: str | None = None
@@ -176,6 +223,20 @@ class JobUpdate(SQLModel):
     applied_at: datetime | None = None
     denied_at: datetime | None = None
     accepted_at: datetime | None = None
+
+    @field_validator("applied_at", "denied_at", "accepted_at", mode="after")
+    @classmethod
+    def _normalize_dates(cls, value: datetime | None) -> datetime | None:
+        return _to_naive_utc(value)
+
+    @field_validator("company", "position", "status")
+    @classmethod
+    def _reject_explicit_null(cls, value, info):
+        # Only runs when the field was provided (defaults skip validation),
+        # so this rejects an explicit null without breaking omitted fields.
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
 
 
 class CommentBase(SQLModel):
@@ -197,7 +258,7 @@ class CommentCreate(CommentBase):
 class CommentRead(CommentBase):
     id: int
     job_id: int
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 class ContactBase(SQLModel):
@@ -250,7 +311,7 @@ class JobListRow(JobRead):
     by the jobs router's list query."""
 
     # Latest of the job's own updated_at and its newest comment.
-    last_activity_at: datetime
+    last_activity_at: UTCDateTime
     comment_count: int
     contact_count: int
     link_count: int
@@ -286,11 +347,22 @@ class ResumeSectionRead(SQLModel):
 
 
 class ResumeSectionUpdate(SQLModel):
-    """PATCH body — everything optional; only provided fields change."""
+    """PATCH body — everything optional; only provided fields change.
+
+    All three columns are non-nullable, so an explicit JSON ``null`` is a
+    422, not a 500 at commit time.
+    """
 
     name: str | None = None
     content: str | None = None
     position: int | None = None
+
+    @field_validator("name", "content", "position")
+    @classmethod
+    def _reject_explicit_null(cls, value, info):
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
 
 
 class ResumeRead(SQLModel):
@@ -338,7 +410,7 @@ class MasterSnapshotSummary(SQLModel):
     """One row of ``GET /resume/snapshots``."""
 
     id: int
-    created_at: datetime
+    created_at: UTCDateTime
     section_count: int
 
 
@@ -346,7 +418,7 @@ class MasterSnapshotDetail(SQLModel):
     """``GET /resume/snapshots/{id}`` — full retained content, read-only."""
 
     id: int
-    created_at: datetime
+    created_at: UTCDateTime
     sections: list[MasterSnapshotSectionRead] = Field(default_factory=list)
 
 
@@ -408,11 +480,22 @@ class TailoredSectionRead(SQLModel):
 
 
 class TailoredSectionUpdate(SQLModel):
-    """PATCH body — everything optional; only provided fields change."""
+    """PATCH body — everything optional; only provided fields change.
+
+    All three columns are non-nullable, so an explicit JSON ``null`` is a
+    422, not a 500 at commit time.
+    """
 
     name: str | None = None
     content: str | None = None
     position: int | None = None
+
+    @field_validator("name", "content", "position")
+    @classmethod
+    def _reject_explicit_null(cls, value, info):
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
 
 
 class TailoredResumeRead(SQLModel):
@@ -421,7 +504,7 @@ class TailoredResumeRead(SQLModel):
     id: int
     job_id: int
     is_submitted: bool
-    created_at: datetime
+    created_at: UTCDateTime
     sections: list[TailoredSectionRead] = Field(default_factory=list)
 
 
@@ -488,6 +571,11 @@ class ExperienceSourceRead(SQLModel):
 class RefreshSummary(SQLModel):
     """``POST /recommendations/refresh`` response — what one press did.
 
+    ``unscored`` counts every inserted job without a match score, whatever
+    the reason (no description to score, or a scoring failure).
+    ``score_failures`` counts only the jobs whose AI scoring call raised —
+    it is a subset of ``unscored``, exposed so the UI can distinguish "no
+    description" from "scoring broke".
     ``remaining_quota`` is the provider's remaining monthly request count
     (from RapidAPI rate-limit headers); None when the provider didn't report
     one.
@@ -496,4 +584,5 @@ class RefreshSummary(SQLModel):
     inserted: int
     skipped_duplicates: int
     unscored: int
+    score_failures: int = 0
     remaining_quota: int | None = None

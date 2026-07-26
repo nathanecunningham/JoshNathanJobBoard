@@ -1,0 +1,34 @@
+{
+  "reviewer": "data-migrations",
+  "findings": [
+    {
+      "title": "Enum columns (job.status, job.source, experiencesource.type) have no DB-level CHECK constraint in SQLite — validation is ORM-only",
+      "why_it_matters": "sa.Enum() defaults to create_constraint=False on the SQLite dialect in SQLAlchemy 2.0, so the hand-written migration (and the equivalent SQLModel-generated column) produces a plain `VARCHAR NOT NULL` column with zero enforcement of the allowed values at the database layer. This was verified directly: dumping sqlite_master for the migrated job/experiencesource tables shows no CHECK constraint on status/source/type. The Pydantic/SQLModel layer will reject bad values on the normal API write path, but anything that writes outside that path — a raw SQL fix-up, a future data-migration script, sqlite3 CLI edits to the personal DB file, or a bug that stores a plain string instead of the enum — can silently insert a value like \"in_progress\" instead of \"applied\". That row will then round-trip fine at the DB layer but raise a ValueError/ValidationError the moment the ORM/Pydantic tries to deserialize it back into JobStatus/JobSource/ExperienceSourceType, which for a list endpoint (e.g. GET /jobs) would break the entire page render for one bad row, not just that record.",
+      "file": "backend/alembic/versions/0001_initial_schema.py",
+      "line": 32,
+      "confidence": 100,
+      "severity": "P2",
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "evidence": [
+        "sa.Enum(\"not_started\", \"applied\", \"denied\", \"accepted\", name=\"jobstatus\") in 0001_initial_schema.py:33 and the matching sa.Enum(...) columns for source (line 41) and experiencesourcetype (line 160-163) all compile on SQLite without a CHECK constraint.",
+        "Verified by creating the DB from the real migration (`alembic upgrade head`) and dumping sqlite_master: `status VARCHAR(11) NOT NULL` and `type VARCHAR(10) NOT NULL` with no CHECK clause anywhere in the table DDL.",
+        "Reproduced the SQLAlchemy default independently: `sa.Enum('a','b',name='foo')` on a fresh sqlite:// engine compiles to `status VARCHAR(1)` with no CHECK, confirming this is SQLAlchemy 2.0's default behavior on the SQLite dialect, not a migration-authoring mistake.",
+        "backend/app/models.py defines JobStatus/JobSource/ExperienceSourceType as `str, Enum` with member name == value in every case (e.g. `not_started = \"not_started\"`), so there is no name/value mismatch risk today — the gap is purely the missing DB-level guard rail for future writers."
+      ],
+      "suggested_fix": "Either accept and document the risk (single-user personal DB, ORM is the only writer today), or add `create_constraint=True` (or set `values_callable` and a CHECK explicitly) to each sa.Enum(...) definition in both the migration and the SQLModel column, keeping alembic autogenerate/check green afterward."
+    }
+  ],
+  "residual_risks": [
+    "DATABASE_PATH is resolved via pydantic-settings reading a relative `.env` / relative default (\"backend-local.db\"). alembic/env.py and app/db.py both call the same get_settings(), so migrations and the app agree *if invoked from the same working directory*. If `alembic upgrade head` or `uvicorn` is ever run from a different CWD than backend/ (or via a script/cron/IDE run-config with a different working directory), pydantic-settings' relative `.env` lookup and the relative default path could silently resolve to a different file, producing a second, un-migrated 'shadow' database rather than an error. Low likelihood for a two-person personal project but worth a one-line note in backend/README.md to always run commands from backend/.",
+    "There is no lifespan/startup hook that runs migrations or checks the alembic revision before serving traffic — a developer who starts `uvicorn` before ever running `alembic upgrade head` will get an implicitly-created empty SQLite file (SQLite creates the file on first connection even for a no-op `SELECT 1` health check) with zero tables, then confusing 'no such table' errors on the first real request rather than a clear 'run your migrations' message.",
+    "Batch-mode (`render_as_batch=True`) is correctly configured in env.py for both online and offline modes, and the FK-pragma-off rationale during migrations is sound, but this has only ever been exercised against a from-empty CREATE (0001). The first real ALTER-style revision (add/rename/drop a column on `job` or another FK-referenced table) will be the first true test of the batch table-rebuild path with existing rows and cross-table foreign keys; nothing today proves that path preserves data end-to-end."
+  ],
+  "testing_gaps": [
+    "No test inserts an out-of-enum string directly via raw SQL/`session.execute(text(...))` to confirm current behavior (accepted silently at the DB layer, then fails on ORM read) — worth a regression test once/if a CHECK constraint is added, so the fix is actually verified.",
+    "No test exercises a second Alembic revision that performs a batch-mode ALTER (e.g., adding a NOT NULL column with a backfill, or renaming a column) against a *populated* SQLite DB created by migration 0001. All current coverage in backend/tests/test_models.py runs `alembic upgrade head` against a fresh empty tmp_path DB and only ever applies revision 0001 (a pure CREATE), so the batch-rebuild/backfill path that the plan says will be needed for every future schema change on this SQLite DB is unproven.",
+    "No test starts the app without first running `alembic upgrade head` to confirm the failure mode (e.g., clear error vs. silent empty-file creation) a new/returning developer would see if they forget the migration step."
+  ]
+}

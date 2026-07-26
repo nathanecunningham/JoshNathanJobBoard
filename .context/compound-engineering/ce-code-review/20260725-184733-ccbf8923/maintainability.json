@@ -1,0 +1,105 @@
+{
+  "reviewer": "maintainability",
+  "findings": [
+    {
+      "title": "JobSource Protocol in job_source.py is a dead, single-implementor abstraction",
+      "why_it_matters": "The Protocol was written to let 'degraded or supplemental providers (Adzuna, Remotive, USAJobs) slot in later without redesign,' but no function anywhere returns or accepts it as a type: build_provider() -> JSearchProvider (concrete class, not the Protocol), and grep across app/ shows zero other references to this Protocol as a parameter or return annotation. It is speculative infrastructure for providers that don't exist, adding a class and a paragraph of docstring that the next developer has to read and mentally discard before finding the one real implementation. When a second provider is eventually added, this Protocol will likely need re-shaping anyway once real variation is known, so it isn't even saving future work.",
+      "file": "backend/app/services/job_source.py",
+      "line": 61,
+      "confidence": 100,
+      "severity": "P2",
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Drop the JobSource Protocol until a second provider actually exists; have build_provider() just return JSearchProvider and note in the module docstring that a shared interface can be extracted when/if a second provider is added.",
+      "evidence": [
+        "backend/app/services/job_source.py:61 class JobSource(Protocol): ... (defines remaining_quota + search())",
+        "backend/app/services/job_source.py:161-174 def build_provider() -> JSearchProvider: (returns the concrete class, never the Protocol)",
+        "grep -rn \"JobSource\\b\" app/ shows no other file references services.job_source.JobSource as a type"
+      ]
+    },
+    {
+      "title": "JobSource (enum) and job_source (module, plus its own unused JobSource Protocol) collide by name in the same file",
+      "why_it_matters": "models.py defines `class JobSource(str, Enum)` (manual/recommended — where a tracked job came from) while services/job_source.py defines an unrelated `class JobSource(Protocol)` (the provider interface) inside a module also named job_source. recommend.py imports both the enum `JobSource` and the module `job_source` side by side. Python's case-sensitivity keeps this from being a syntax problem, but it means two completely different concepts share the same name in the same file, which is exactly the kind of near-identical naming that costs a reader (especially one still learning to read code) a double-take every time they see `JobSource` vs `job_source` — and invites import-autocomplete mistakes when a new feature needs 'the job source thing.'",
+      "file": "backend/app/services/recommend.py",
+      "line": 28,
+      "confidence": 75,
+      "severity": "P2",
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Rename one of the two: e.g. models.JobSource -> JobOrigin (it really answers 'how did this job enter the tracker'), leaving job_source.py's naming (module + provider abstraction) untouched. Combined with the prior finding, this Protocol may not need to exist at all.",
+      "evidence": [
+        "backend/app/models.py:38 class JobSource(str, Enum): manual / recommended",
+        "backend/app/services/job_source.py:61 class JobSource(Protocol)",
+        "backend/app/services/recommend.py:23-34 imports both `JobSource` (from app.models) and `job_source` (from app.services) in the same import block"
+      ]
+    },
+    {
+      "title": "models.py module docstring describes an organization the file doesn't follow",
+      "why_it_matters": "The docstring says 'Schemas for the resume/config endpoints arrive with their routers (U4-U6); only the tracker shapes (Job + sub-resources) are defined here' — but the file as committed contains all of ResumeSection/MasterSnapshot/TailoredResume/ConfigProfile/ExperienceSource and their Read/Create/Update variants (lines 272-499). This is stale guidance from an earlier plan that later agents didn't follow, left uncorrected. A developer who trusts this docstring (Nathan, learning the codebase) will look in resume.py/tailor.py/settings.py for schemas that are actually in models.py, wasting time and undermining trust in the file's own documentation.",
+      "file": "backend/app/models.py",
+      "line": 14,
+      "confidence": 100,
+      "severity": "P2",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Update the module docstring to reflect reality: all API schemas for every domain (tracker, resume, tailoring, settings, recommendations) live in models.py; only the tables/logic specific to each router stay in the router file.",
+      "evidence": [
+        "backend/app/models.py:14 \"Schemas for the resume/config endpoints arrive with their routers (U4–U6); only the tracker shapes (Job + sub-resources) are defined here.\"",
+        "backend/app/models.py:272-499 defines ResumeSection, ResumeSectionRead/Update, MasterSnapshot(Section)(Summary/Detail), TailoredResume/Section (+Read/Update), ConfigProfile(Read/Update), ExperienceSource(Create/Read), RefreshSummary — all in this file, contradicting the docstring"
+      ]
+    },
+    {
+      "title": "The get-or-404 pattern is reimplemented independently by every router instead of being shared, and one router reaches into another's internals to get it",
+      "why_it_matters": "Six near-identical blocks of `obj = session.get(Model, id); if obj is None: raise HTTPException(404, f\"{Label} {id} not found\")` are hand-written across jobs.py (job, comment, contact, link), resume.py (snapshot, section), tailor.py (tailored resume, tailored section), and settings.py (experience source) — some behind a named helper, some inlined. Because there's no shared utility, tailor.py resorts to `from app.routers.jobs import get_job_or_404`, importing a helper that jobs.py never intended as a public export — now tailor.py's correctness is coupled to jobs.py's internal naming, and a change to that helper's signature or message format in jobs.py silently changes tailor.py's behavior too. The next unit (correspondence, per the charter's planned features) will either write an eighth near-duplicate or import from wherever is most convenient, compounding the drift.",
+      "file": "backend/app/routers/tailor.py",
+      "line": 39,
+      "confidence": 75,
+      "severity": "P2",
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Extract a single generic helper, e.g. `def get_or_404(session, model, id, label) -> T` in a shared module (app/db.py or a new app/routers/_util.py), and have every router (including jobs.py and tailor.py) call it instead of hand-rolling or cross-importing.",
+      "evidence": [
+        "backend/app/routers/jobs.py:55-59 def get_job_or_404(...)",
+        "backend/app/routers/tailor.py:39 from app.routers.jobs import get_job_or_404",
+        "backend/app/routers/tailor.py:45-51 def get_tailored_or_404(...) (a second, separately hand-written version of the same pattern in the same file)",
+        "backend/app/routers/resume.py:166-170 and 189-192 inline the same pattern twice with no helper at all",
+        "backend/app/routers/settings.py:79-83 inlines the same pattern again"
+      ]
+    },
+    {
+      "title": "Schema-variant convention (Base-class inheritance vs. hand-duplicated fields) diverges between the tracker models and every other domain",
+      "why_it_matters": "The tracker models (Job/Comment/Contact/JobLink) share fields via a `XBase(SQLModel)` that `X(table=True)`, `XCreate`, and `XRead` all inherit from, so a field added once shows up everywhere it should automatically. Every other domain added later (ResumeSection, MasterSnapshotSection, TailoredResume/Section, ConfigProfile, ExperienceSource) instead lists the same fields by hand in the table class and again in each Read/Create/Update class, with no shared base. This isn't wrong today, but it means the codebase now teaches two different conventions for the same problem, and adding a field to e.g. ResumeSection requires remembering to also add it, by hand, to ResumeSectionRead — the Base-class version of this class would have caught that automatically at the type level.",
+      "file": "backend/app/models.py",
+      "line": 272,
+      "confidence": 50,
+      "severity": "P3",
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Either standardize the non-tracker models on the same XBase pattern (preferred, since it's already proven and documented in this file), or note in the models.py docstring that the Base pattern is reserved for models with genuinely divergent Create/Read shapes and simple duplication is intentional for the rest — so the next contributor doesn't have to guess which convention to follow.",
+      "evidence": [
+        "backend/app/models.py:103-178 JobBase -> Job/JobCreate/JobRead/JobUpdate (shared base)",
+        "backend/app/models.py:272-293 ResumeSection (table) and ResumeSectionRead duplicate id/name/content/position independently, no shared base",
+        "backend/app/models.py:358-425 TailoredResume/TailoredSection and their Read variants duplicate fields by hand",
+        "backend/app/models.py:439-472 ConfigProfile and ConfigProfileRead duplicate experience/location/pay_min by hand"
+      ]
+    }
+  ],
+  "residual_risks": [
+    "models.py is already ~500 lines covering six distinct domains (tracker, resume, master snapshots, tailored resumes, config/settings, recommendations); it's still navigable today thanks to clear section-banner comments, but the planned correspondence/email-tracking feature (charter item 3) would be a natural point to split it into per-domain schema modules before it grows further.",
+    "The word 'settings' names two unrelated things in this codebase — app.config.Settings/get_settings() (env-derived app configuration: API keys, DB path) and app/routers/settings.py (the user-facing job-search profile/experience-sources API). They never collide in the same file today, but the overlap is a plausible source of confusion as the settings router grows."
+  ],
+  "testing_gaps": [
+    "No test exercises services/job_source.py's JobSource Protocol as a type (consistent with it being unused/dead) — its uselessness wouldn't be caught by any currently-planned test.",
+    "No test asserts on the models.py module docstring's claims about where schemas live, so documentation drift like the one flagged here isn't guarded against by CI."
+  ]
+}

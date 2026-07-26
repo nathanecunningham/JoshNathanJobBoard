@@ -13,6 +13,15 @@ from sqlmodel import Session, SQLModel
 from app import models  # noqa: F401 — registers all tables on SQLModel.metadata
 from app.db import create_db_engine, get_session
 from app.main import create_app
+from app.services import job_source
+
+
+@pytest.fixture(autouse=True)
+def reset_quota_memory(monkeypatch):
+    """The provider remembers the last-seen quota at module level so the
+    floor check survives refreshes — reset it between tests."""
+    monkeypatch.setattr(job_source, "_last_known_remaining", None)
+    monkeypatch.setattr(job_source, "_last_known_month", None)
 
 
 @pytest.fixture

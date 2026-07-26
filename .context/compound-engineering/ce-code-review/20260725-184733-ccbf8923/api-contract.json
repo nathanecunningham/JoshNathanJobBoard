@@ -1,0 +1,109 @@
+{
+  "reviewer": "api-contract",
+  "findings": [
+    {
+      "title": "GET /health returns a bare dict with no response_model — its shape is invisible in the OpenAPI docs that are the frontend contract",
+      "severity": "P2",
+      "file": "backend/app/main.py",
+      "line": 34,
+      "confidence": 75,
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "R10 states the FastAPI auto-docs ARE the frontend contract — Nathan's screens get built directly against them. Every other endpoint in this diff declares response_model=<Pydantic schema>, so Swagger/ReDoc show the exact field names and types. /health instead returns a plain `dict` with no response_model; FastAPI can only document it as an untyped object (no `status`/`database` properties visible), so a consumer reading the docs has no way to discover the two fields without opening main.py. Low stakes (health checks are rarely consumed by UI), but it is the one endpoint in the whole surface that breaks the 'docs describe every shape' invariant the rest of the API establishes.",
+      "evidence": [
+        "backend/app/main.py:34-42 — `def health(...) -> dict:` returns `{\"status\": \"ok\", \"database\": database}` with no `response_model=`.",
+        "Every router endpoint elsewhere in the diff (jobs.py, resume.py, tailor.py, settings.py, recommendations.py) declares an explicit response_model."
+      ],
+      "suggested_fix": "Add a small `HealthRead(SQLModel)` (or plain BaseModel) with `status: str` and `database: str` (or a Literal[\"ok\",\"error\"]) and set `response_model=HealthRead` on the health route."
+    },
+    {
+      "title": "422 error bodies have two incompatible shapes on the same status code — automatic Pydantic validation errors return a list, hand-raised business errors return a string",
+      "severity": "P1",
+      "file": "backend/app/routers/tailor.py",
+      "line": 84,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "Every hand-raised HTTPException across all five routers uses `detail=<string>` (a single human-readable message), which is consistent. But FastAPI's own automatic request-validation errors (triggered by Pydantic Field constraints like `min_length=1`) return `detail=[{\"loc\":...,\"msg\":...,\"type\":...}, ...]` — a list of objects, not a string — and both classes of error use the SAME status code (422) on the SAME endpoint. Concretely, POST /jobs/{id}/tailor with `section_ids: []` triggers the automatic list-shaped 422 (TailorRequest.section_ids has `min_length=1`), while `section_ids: [999]` (unknown id) or a missing description hits the hand-written string-shaped 422 in the same handler. A frontend that writes one generic '422 → show detail as a message' error handler (the natural thing to do, since every other status code in this API is a plain string) will render `[object Object]`/an unreadable array for one of the two 422 causes on the very same endpoint.",
+      "evidence": [
+        "backend/app/routers/tailor.py:83-90 — `raise HTTPException(status_code=422, detail=\"This job has no stored description...\")` (string).",
+        "backend/app/routers/tailor.py:96-101 — `raise HTTPException(status_code=422, detail=f\"Unknown master resume section ids: {unknown}\")` (string).",
+        "backend/app/models.py:397 — `TailorRequest.section_ids: list[int] = Field(min_length=1)` — an empty list on the same POST /jobs/{id}/tailor endpoint is rejected by Pydantic automatically, producing FastAPI's default `detail: [{...}]` list shape, not a string.",
+        "backend/app/models.py:306 — `ResumeImportText.text: str = Field(min_length=1)` on POST /resume/import/text has the identical dual-shape 422 exposure.",
+        "No custom exception handler for RequestValidationError exists anywhere in backend/app/main.py to normalize the two shapes."
+      ],
+      "suggested_fix": "Add a `@app.exception_handler(RequestValidationError)` in main.py that reshapes FastAPI's default validation-error payload into the same `{\"detail\": \"<string>\"}` convention used by every hand-raised HTTPException (e.g., join the Pydantic error messages), so all 4xx responses across the API share one shape regardless of whether the check happened in Pydantic or in router code."
+    },
+    {
+      "title": "PATCH /tailored/{id} requires its only field, breaking the app-wide 'PATCH = everything optional' convention established by every sibling PATCH schema",
+      "severity": "P2",
+      "file": "backend/app/models.py",
+      "line": 428,
+      "confidence": 75,
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "JobUpdate, ResumeSectionUpdate, and TailoredSectionUpdate are all explicitly documented ('PATCH body — everything optional; only provided fields change') and implemented with every field as `X | None = None`, consumed via `exclude_unset=True`. TailoredResumeUpdate breaks that pattern: `is_submitted: bool` has no default and is not Optional, so PATCH /tailored/{id} with an empty or omitted-field body is a 422, not a no-op. A frontend built against the rest of the API's PATCH convention (send only what changed) will reasonably assume this endpoint behaves the same way and can 422 unexpectedly, e.g. a generic PATCH helper that always includes an `exclude_unset` payload could send `{}` here and fail where every other PATCH endpoint would silently succeed as a no-op.",
+      "evidence": [
+        "backend/app/models.py:410-415 — TailoredSectionUpdate: all fields `X | None = None` (optional, exclude_unset pattern).",
+        "backend/app/models.py:168-178 — JobUpdate: all fields optional, same pattern.",
+        "backend/app/models.py:288-293 — ResumeSectionUpdate: all fields optional, same pattern.",
+        "backend/app/models.py:428-431 — TailoredResumeUpdate: `is_submitted: bool` — required, no default, the lone exception to the pattern.",
+        "backend/app/routers/tailor.py:157-182 — update_tailored reads `body.is_submitted` directly (not via exclude_unset), confirming the field is always expected to be present."
+      ],
+      "suggested_fix": "Either (a) make `is_submitted: bool | None = None` and treat an omitted value as a no-op, matching the codebase convention, or (b) explicitly document this endpoint's field as a required PUT-like update (it's the only exception) so the frontend doesn't assume the general PATCH contract applies here too."
+    },
+    {
+      "title": "POST /resume/import/text and /resume/import/pdf return 200 while every other resource-creating POST in the API returns 201",
+      "severity": "P3",
+      "file": "backend/app/routers/resume.py",
+      "line": 98,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "POST /jobs, POST /jobs/{id}/comments, POST /jobs/{id}/contacts, POST /jobs/{id}/links, POST /settings/sources, and POST /jobs/{id}/tailor all explicitly set `status_code=201` because they create a new addressable resource. POST /resume/import/text and /resume/import/pdf create the master resume's sections (first import) or destructively replace them (re-import) but use FastAPI's default 200. The status-code convention is otherwise 100% consistent in this diff, so this is the one visible outlier; a consumer relying on '201 means something new was created' for optimistic UI (e.g. showing a toast, or diffing that a create actually happened) would treat resume import differently from every other creating action even though it is at least as consequential (it replaces the whole master resume). It is defensible as a singleton-replace (matching PUT /settings/profile's 200), so this is presented as an inconsistency to resolve deliberately rather than a clear-cut bug.",
+      "evidence": [
+        "backend/app/routers/resume.py:98 — `@router.post(\"/import/text\", response_model=ResumeRead)` — no status_code, defaults to 200.",
+        "backend/app/routers/resume.py:107 — `@router.post(\"/import/pdf\", response_model=ResumeRead)` — same.",
+        "backend/app/routers/jobs.py:146 — `@router.post(\"\", response_model=JobRead, status_code=201)` for comparison.",
+        "backend/app/routers/tailor.py:66-70 — `@router.post(\"/jobs/{job_id}/tailor\", response_model=TailoredResumeRead, status_code=201)` for comparison."
+      ],
+      "suggested_fix": "Decide and document one rule: 201 for anything that creates a new addressable id (jobs, comments, tailored resumes), 200 for anything that replaces a singleton (profile, master resume). If that's the intended rule, resume import at 200 is already correct — just state it in resume.py's docstring so it reads as deliberate rather than an oversight."
+    },
+    {
+      "title": "Every timestamp in every Read schema is a naive datetime with no UTC marker on the wire — JS `new Date()` on the frontend will silently parse them as local time",
+      "severity": "P1",
+      "file": "backend/app/models.py",
+      "line": 28,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "models.py documents the convention explicitly: 'Timestamps are naive UTC (SQLite stores datetimes without timezone info)'. Pydantic/FastAPI serializes a naive Python datetime to JSON as an ISO-8601 string with no 'Z' suffix or offset (e.g. \"2026-07-25T18:30:00\"), not as \"2026-07-25T18:30:00Z\". Every timestamp field the frontend will consume — Job.created_at/updated_at/applied_at/denied_at/accepted_at/dismissed_at, JobListRow.last_activity_at, CommentRead.created_at, MasterSnapshot(Summary/Detail).created_at, TailoredResumeRead.created_at — inherits this. In JavaScript, `new Date(\"2026-07-25T18:30:00\")` (no offset) is parsed as LOCAL time, not UTC, per the ECMAScript Date Time String spec. Every relative-time display ('applied 2 hours ago'), every date shown on Nathan's board, and the client-side portion of any sort/filter by date will be silently off by the browser's UTC offset — with no error, just wrong times, and the bug will only surface once the frontend renders real data (likely to be missed until users outside UTC, or during DST, notice numbers don't add up).",
+      "evidence": [
+        "backend/app/models.py:9-13 and :28-30 — `utcnow()` returns `datetime.now(UTC).replace(tzinfo=None)`, explicitly stripping tzinfo before storage; the docstring states the SQLite/naive convention.",
+        "Every *Read schema with a datetime field (JobRead, JobListRow, JobDetail, CommentRead, MasterSnapshotSummary/Detail, TailoredResumeRead) inherits this naive datetime with no field_serializer to add a 'Z' or offset.",
+        "No `field_serializer`/`model_config` anywhere in models.py normalizes datetime output to an explicit-UTC ISO string."
+      ],
+      "suggested_fix": "Add a shared Pydantic `field_serializer`/`model_config` (or a base `Read` mixin) that serializes datetimes with an explicit 'Z' suffix (treat the naive value as UTC and emit `...Z` or `+00:00`), so every timestamp is unambiguous over the wire and `new Date(value)` on the frontend parses correctly regardless of the browser's timezone."
+    }
+  ],
+  "residual_risks": [
+    "No list endpoint in the API (GET /jobs, /jobs/{id}/comments|contacts|links, /resume/snapshots, /settings/sources, /jobs/{id}/tailored) supports pagination or limit/offset. Acceptable for a single-user v1 dataset, but if it ships to the frontend as-is and the job/comment counts grow, there is no documented contract for adding pagination later (page param vs cursor vs Link headers) — worth deciding the shape now even if unused, so a future addition doesn't have to choose between an additive query param (safe) and a response-shape change (breaking, since today's response is a bare array, not an envelope with items+cursor).",
+    "Route naming has a verb/noun split that could confuse a consumer reading the OpenAPI path list: POST /jobs/{id}/tailor (verb, creates a resource) vs GET /jobs/{id}/tailored (noun, lists that resource) vs GET/PATCH/DELETE /tailored/{id} (different prefix entirely, documented in tailor.py's own module docstring as a deliberate compromise). Not a breaking-change risk, but worth a one-line note in the docs since R10 says the auto-docs are read directly as the contract.",
+    "RawJob (job_source.py) carries `location`, `salary_min`, and `salary_max` fetched from the JSearch provider, but Job/JobBase/JobRead have no corresponding columns — recommend.py's `make_job()` silently drops all three on insert. This isn't a breaking change (nothing previously exposed these fields), but if Nathan's prototype screens show a location or salary field on a job card (common for job-board UIs), the contract has no field to bind to at all — worth flagging before frontend screens are built against the current schema."
+  ],
+  "testing_gaps": [
+    "No test asserts the actual JSON shape of a 422 response for the automatic-validation case (e.g. POST /jobs/{id}/tailor with section_ids: []) versus the hand-raised case (unknown section id) to pin down that they currently differ — this is exactly the kind of contract drift that would otherwise only be caught by a frontend engineer hitting it live.",
+    "No test asserts the on-the-wire string format of a timestamp field (e.g. that JobRead.created_at serializes to a value JS can parse as UTC) — the naive-datetime risk above would be caught by a single snapshot/regex assertion on a raw response body.",
+    "No test hits GET /health and asserts on response body field names — since there's no response_model, nothing pins the shape against accidental changes."
+  ]
+}

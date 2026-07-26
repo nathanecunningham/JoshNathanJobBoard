@@ -200,6 +200,48 @@ def test_tailor_unknown_job_is_404(client, engine, mock_tailor):
     assert mock_tailor == []
 
 
+def test_master_section_deleted_during_ai_call_still_tailors(
+    client, engine, monkeypatch
+):
+    """The master can change while the Claude call runs (network happens
+    before the transaction). A section deleted mid-call must not break the
+    insert: its snapshot content is already in memory, so the copy succeeds
+    with base_section_id recorded as None."""
+    ids = seed_master(engine)
+    job_id = make_job(client)
+    deleted_id = ids[0]
+
+    def deleting_tailor(job_description, sections):
+        # Simulate a concurrent destructive re-import landing mid-call.
+        with Session(engine) as other:
+            other.delete(other.get(ResumeSection, deleted_id))
+            other.commit()
+        return [
+            TailoredContent(section_id=s.id, content=rewritten(s.name))
+            for s in sections
+        ]
+
+    monkeypatch.setattr(ai, "tailor_sections", deleting_tailor)
+
+    response = client.post(
+        f"/jobs/{job_id}/tailor", json={"section_ids": [ids[0], ids[1]]}
+    )
+    assert response.status_code == 201
+    sections = response.json()["sections"]
+    by_name = {s["name"] for s in sections}
+    assert by_name == {n for n, _ in MASTER_SECTIONS}  # nothing lost
+
+    deleted_copy = next(
+        s for s in sections if s["name"] == MASTER_SECTIONS[0][0]
+    )
+    assert deleted_copy["base_section_id"] is None  # provenance gone...
+    assert deleted_copy["content"] == rewritten(MASTER_SECTIONS[0][0])  # ...content intact
+    surviving_copy = next(
+        s for s in sections if s["name"] == MASTER_SECTIONS[1][0]
+    )
+    assert surviving_copy["base_section_id"] == ids[1]
+
+
 # ---------------------------------------------------------------------------
 # Reading tailored copies
 # ---------------------------------------------------------------------------

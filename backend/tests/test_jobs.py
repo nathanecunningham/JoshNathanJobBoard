@@ -211,7 +211,8 @@ def test_explicit_date_in_same_patch_wins_over_auto_set(client):
         f"/jobs/{job['id']}",
         json={"status": "applied", "applied_at": "2026-06-01T09:30:00"},
     ).json()
-    assert updated["applied_at"] == "2026-06-01T09:30:00"
+    # Responses carry an explicit UTC marker on every datetime.
+    assert updated["applied_at"] == "2026-06-01T09:30:00Z"
 
 
 def test_create_with_status_and_explicit_date_preserves_backfill(client):
@@ -220,14 +221,16 @@ def test_create_with_status_and_explicit_date_preserves_backfill(client):
         client, status="applied", applied_at="2026-06-25T10:00:00"
     )
     assert job["status"] == "applied"
-    assert job["applied_at"] == "2026-06-25T10:00:00"
+    assert job["applied_at"] == "2026-06-25T10:00:00Z"
 
 
 def test_create_with_status_but_no_date_auto_sets_now(client):
     before = utcnow()
     job = create_job(client, status="applied")
     assert job["applied_at"] is not None
-    assert datetime.fromisoformat(job["applied_at"]) >= before
+    # The wire value is UTC-marked ("Z"); parse and compare as naive UTC.
+    applied_at = datetime.fromisoformat(job["applied_at"]).replace(tzinfo=None)
+    assert applied_at >= before
 
 
 def test_reapplication_updates_applied_at_and_keeps_denied_at(client):
@@ -303,6 +306,37 @@ def test_patch_updates_fields_and_recomputes_dedup_hash(client, engine):
         assert job.dedup_hash == compute_dedup_hash(
             "Roche", "Senior Scientist", None
         )
+
+
+def test_response_datetimes_carry_utc_marker(client):
+    """Every datetime in a JSON response ends with "Z" and round-trips as
+    an aware UTC datetime — the wire format is explicit about timezone."""
+    from datetime import UTC as utc_zone
+
+    job = create_job(client, status="applied")
+    for field in ("created_at", "updated_at", "applied_at"):
+        value = job[field]
+        assert value.endswith("Z"), f"{field} missing UTC marker: {value}"
+        parsed = datetime.fromisoformat(value)
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset().total_seconds() == 0
+        assert parsed.astimezone(utc_zone).tzinfo == utc_zone
+
+
+def test_patch_explicit_null_for_non_nullable_field_is_422(client):
+    """An explicit JSON null for a non-nullable column is rejected up
+    front (422 with a string detail), not a 500 at commit time."""
+    job_id = create_job(client)["id"]
+    response = client.patch(f"/jobs/{job_id}", json={"company": None})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert "company" in detail
+
+    # Nullable fields still accept explicit null (clearing a date).
+    ok = client.patch(f"/jobs/{job_id}", json={"applied_at": None})
+    assert ok.status_code == 200
+    assert ok.json()["applied_at"] is None
 
 
 def test_unknown_job_id_returns_404(client):
@@ -395,3 +429,19 @@ def test_deleting_sub_resource_from_wrong_job_returns_404(client):
         client.delete(f"/jobs/{job_b}/comments/{comment['id']}").status_code == 404
     )
     assert len(client.get(f"/jobs/{job_a}/comments").json()) == 1
+
+
+def test_aware_datetime_input_is_normalized_to_utc(client):
+    """An offset-bearing backfill date must store (and serve) the correct
+    UTC instant — SQLite would otherwise silently drop the offset."""
+    response = client.post(
+        "/jobs",
+        json={
+            "company": "Fictional Imaging Corp",
+            "position": "Staff Scientist",
+            "status": "applied",
+            "applied_at": "2026-06-01T09:30:00+05:00",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["applied_at"] == "2026-06-01T04:30:00Z"

@@ -1,0 +1,42 @@
+{
+  "reviewer": "kieran-python",
+  "findings": [
+    {
+      "title": "health() endpoint breaks the codebase's own typed-response convention",
+      "why_it_matters": "Every other endpoint in this diff (jobs.py, resume.py, tailor.py, settings.py, recommendations.py) declares a precise SQLModel/Pydantic response_model and a matching return type — that consistency is what makes the auto-generated OpenAPI docs a trustworthy reference (the charter explicitly calls the docs 'the reference for what data exists'). health() is the one endpoint that returns a bare `dict`, with no response_model and no return-type shape, so it won't show a real schema in /docs and offers no static guarantee its two keys are what callers expect. The bare `except Exception` also discards the actual failure (no logging), so when database becomes 'error' in production there is no way to tell why from server-side signals alone — you'd have to reproduce the failure by hand.",
+      "severity": "P2",
+      "file": "backend/app/main.py",
+      "line": 34,
+      "confidence": 75,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Add a small `class HealthResponse(BaseModel): status: Literal['ok']; database: Literal['ok', 'error']` (or reuse SQLModel) in models.py or main.py, set `response_model=HealthResponse` and return type `-> HealthResponse`, and log/capture the exception (e.g. `logger.exception(...)` or attach `str(exc)` to a debug-only field) instead of silently discarding it in the except block.",
+      "evidence": [
+        "backend/app/main.py:34-42: `def health(session: Session = Depends(get_session)) -> dict: ... except Exception: database = \"error\" ... return {\"status\": \"ok\", \"database\": database}` — no response_model, untyped dict, exception detail dropped.",
+        "backend/tests/test_health.py:12-15 only asserts the happy path (`database: \"ok\"`); no test exercises the except branch, so the swallowed-exception behavior is entirely unverified."
+      ]
+    },
+    {
+      "title": "Per-job AI scoring failures are swallowed with no diagnostic trail",
+      "why_it_matters": "`ai.score_job` failures (AIUnavailableError/AIParseError) are caught per-job and silently converted into an unscored job — deliberate and documented, and the `unscored` count in RefreshSummary does surface *that* it happened. But the actual exception message (e.g. 'invalid API key' vs 'Claude returned malformed output') is discarded with a bare `pass`, not logged anywhere. If the Anthropic key is revoked or rate-limited mid-refresh, every job in that batch silently becomes unscored with an identical, uninformative summary — the user has no way to distinguish 'transient parse hiccup on this one posting' from 'the whole AI integration is broken' short of trial and error.",
+      "severity": "P2",
+      "file": "backend/app/services/recommend.py",
+      "line": 131,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "suggested_fix": "Log the caught exception (module-level `logging.getLogger(__name__)`) before falling through to the unscored path, so operators can distinguish a systemic AI outage from isolated per-job parse failures without re-running the refresh under a debugger."
+    }
+  ],
+  "residual_risks": [
+    "No ruff/mypy config exists anywhere in pyproject.toml — the manual type-hint discipline visible across models.py/routers/services is currently unenforced by tooling, so it can silently erode as the codebase grows past this initial, carefully-written slice.",
+    "job_source.py `_parse_job(item: dict)` and ai.py's `content: list[dict] = []` use bare `dict` for external API/SDK payloads; acceptable for now given both shapes are provider/SDK-owned and validated downstream via pydantic models, but worth tightening to `dict[str, Any]` if these payloads grow more fields that get silently ignored."
+  ],
+  "testing_gaps": [
+    "No test exercises the `except Exception: database = \"error\"` branch of the /health endpoint — the only place in the diff where an exception's detail is deliberately discarded is also the only untested failure path."
+  ]
+}

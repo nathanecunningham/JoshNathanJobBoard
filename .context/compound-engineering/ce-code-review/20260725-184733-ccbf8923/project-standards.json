@@ -1,0 +1,8 @@
+{
+  "reviewer": "project-standards",
+  "findings": [],
+  "residual_risks": [
+    "CLAUDE.md Working Agreements (line 63, unchanged by this diff) still reads 'keep them in the local DB / `.env.local`', but the shipped implementation standardizes on a plain `.env` file (backend/.env.example line 1, backend/app/config.py `env_file=\".env\"`). The build plan's U1 file-change note explicitly anticipated this and instructed that the charter's `.env.local` mention 'should be read as' covering `.env`, so this is a deliberate, plan-sanctioned interpretation rather than an unaddressed rule violation -- but the charter text itself was never updated to say `.env`, so a future reader of CLAUDE.md alone (without the plan) could be misled about the actual filename. Confidence too low to file as a primary finding (the plan pre-authorizes the gap), but worth a follow-up edit to CLAUDE.md for clarity."
+  ],
+  "testing_gaps": []
+}

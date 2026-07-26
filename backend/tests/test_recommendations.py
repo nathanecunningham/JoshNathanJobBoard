@@ -184,6 +184,7 @@ def test_refresh_inserts_new_jobs_with_scores(client, engine, provider, scorer):
         "inserted": 3,
         "skipped_duplicates": 0,
         "unscored": 0,
+        "score_failures": 0,
         "remaining_quota": 142,
     }
     assert fake.calls == 1
@@ -483,6 +484,7 @@ def test_dismissed_job_is_not_reimported_and_restore_keeps_dedup(
         "inserted": 0,
         "skipped_duplicates": 3,
         "unscored": 0,
+        "score_failures": 0,
         "remaining_quota": 150,
     }
     assert len(client.get("/jobs").json()) == 2  # dismissed one hidden
@@ -588,11 +590,43 @@ def test_ai_failure_for_one_job_leaves_it_unscored(
     body = response.json()
     assert body["inserted"] == 3
     assert body["unscored"] == 1
+    assert body["score_failures"] == 1
 
     jobs = {job.company: job for job in recommended_jobs(engine)}
     assert jobs["Nimbus Imaging LLC"].match_score is None
     assert jobs["Axon Biosciences, Inc."].match_score == 90
     assert jobs["Placeholder Pharma"].match_score == 90
+
+
+def test_all_scoring_failures_still_insert_and_are_counted(
+    client, engine, provider, anthropic_key, monkeypatch
+):
+    """A completely broken scorer never fails the refresh: every job lands
+    unscored. ``unscored`` is the total without a score (failures AND
+    no-description jobs); ``score_failures`` counts only the raised calls."""
+    seed_profile(engine)
+    jobs = make_raw_jobs()
+    jobs[2] = RawJob(
+        source_ref="prov-3",
+        company="Placeholder Pharma",
+        position="Image Analysis Engineer",
+        description=None,  # never scored — no AI call, so no failure
+        url="https://placeholderpharma.example/careers/3",
+    )
+    provider(jobs)
+
+    def always_raises(profile, company, position, description):
+        raise ai.AIParseError("Synthetic total scoring outage.")
+
+    monkeypatch.setattr(ai, "score_job", always_raises)
+
+    response = client.post("/recommendations/refresh")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["inserted"] == 3
+    assert body["unscored"] == 3  # nothing got a score
+    assert body["score_failures"] == 2  # only the two scoring attempts raised
+    assert all(job.match_score is None for job in recommended_jobs(engine))
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +824,128 @@ def test_jsearch_provider_refuses_outright_below_floor():
         provider.search("anything", None, pages=1)
 
 
+def test_jsearch_provider_refuses_at_exact_floor():
+    """Spending a request AT the floor would drop the quota below it, so
+    the provider refuses at <= QUOTA_FLOOR, not just strictly below."""
+    provider = mock_provider(lambda request: httpx.Response(200, json={}))
+    provider.remaining_quota = job_source.QUOTA_FLOOR
+    with pytest.raises(ProviderQuotaError, match="floor"):
+        provider.search("anything", None, pages=1)
+
+
+def test_low_quota_survives_into_next_fresh_provider(monkeypatch):
+    """A refresh whose headers reported low quota poisons the well for the
+    NEXT refresh too: build_provider seeds the fresh instance from the
+    module-level memory, and it refuses before any HTTP request."""
+    # First search learns from the header that only 10 requests remain.
+    first = mock_provider(
+        lambda request: httpx.Response(
+            200,
+            json=JSEARCH_RESPONSE,
+            headers={"x-ratelimit-requests-remaining": "10"},
+        )
+    )
+    first.search("microscopy analyst", None, pages=1)
+    assert first.remaining_quota == 10
+
+    # The next refresh builds a brand-new provider from settings...
+    monkeypatch.setattr(
+        job_source,
+        "get_settings",
+        lambda: Settings(
+            anthropic_api_key=None,
+            jsearch_api_key="synthetic-key",
+            _env_file=None,
+        ),
+    )
+    fresh = job_source.build_provider()
+    assert fresh.remaining_quota == 10  # seeded from the module memory
+
+    # ...and refuses without spending a request: the client would fail the
+    # test if any HTTP call were attempted.
+    def no_http_allowed(request):
+        raise AssertionError("no HTTP request should be made below the floor")
+
+    fresh._client = httpx.Client(transport=httpx.MockTransport(no_http_allowed))
+    with pytest.raises(ProviderQuotaError, match="floor"):
+        fresh.search("anything", None, pages=1)
+
+
+def test_jsearch_provider_keeps_partial_results_when_later_page_fails():
+    """Page 1 succeeded (and was paid for); a 429 on page 2 returns the
+    partial results instead of throwing them away."""
+    request_count = 0
+
+    def handler(request):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            return httpx.Response(
+                200,
+                json=JSEARCH_RESPONSE,
+                headers={"x-ratelimit-requests-remaining": "100"},
+            )
+        return httpx.Response(429)
+
+    provider = mock_provider(handler)
+    jobs = provider.search("anything", None, pages=3)
+    assert request_count == 2  # stopped after the failed second page
+    assert len(jobs) == 2  # page 1's results kept
+
+
+def test_jsearch_provider_partial_results_on_later_http_error():
+    request_count = 0
+
+    def handler(request):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            return httpx.Response(200, json=JSEARCH_RESPONSE)
+        return httpx.Response(500)
+
+    provider = mock_provider(handler)
+    jobs = provider.search("anything", None, pages=2)
+    assert len(jobs) == 2
+
+
+def test_malformed_provider_response_is_502(client, engine, scorer, monkeypatch):
+    """A 200 with a non-JSON body from JSearch is a provider failure (502),
+    not an unhandled exception."""
+    seed_profile(engine)
+    provider = mock_provider(
+        lambda request: httpx.Response(200, text="<html>not json</html>")
+    )
+    monkeypatch.setattr(job_source, "build_provider", lambda: provider)
+
+    response = client.post("/recommendations/refresh")
+    assert response.status_code == 502
+    assert "malformed" in response.json()["detail"]
+    assert recommended_jobs(engine) == []
+
+
+def test_one_bad_provider_item_is_skipped_not_fatal(
+    client, engine, scorer, monkeypatch
+):
+    """A single unparseable entry in ``data[]`` is skipped; the good ones
+    still insert."""
+    seed_profile(engine)
+    payload = {
+        "status": "OK",
+        "data": [
+            {"employer_name": "No Id Corp", "job_title": "Broken"},  # no job_id
+            JSEARCH_RESPONSE["data"][0],  # a good posting
+        ],
+    }
+    provider = mock_provider(lambda request: httpx.Response(200, json=payload))
+    monkeypatch.setattr(job_source, "build_provider", lambda: provider)
+
+    response = client.post("/recommendations/refresh")
+    assert response.status_code == 200
+    assert response.json()["inserted"] == 1
+    (job,) = recommended_jobs(engine)
+    assert job.source_ref == "jsearch-abc123"
+
+
 def test_build_provider_requires_key(monkeypatch):
     monkeypatch.setattr(
         job_source,
@@ -876,3 +1032,46 @@ def test_score_job_rejects_out_of_range_score(monkeypatch):
     monkeypatch.setattr(ai, "_build_client", lambda: StubClient())
     with pytest.raises(ai.AIParseError, match="no match score"):
         ai.score_job("profile", "Company", "Role", "Description")
+
+
+def test_quota_memory_expires_after_month_rollover(monkeypatch):
+    """A low reading from a PREVIOUS month must not lock the feature out:
+    the quota resets monthly, so build_provider discards stale cache and
+    lets the next search re-learn the real value."""
+    monkeypatch.setattr(job_source, "_last_known_remaining", 5)
+    monkeypatch.setattr(job_source, "_last_known_month", "2020-01")
+    monkeypatch.setattr(
+        job_source,
+        "get_settings",
+        lambda: Settings(
+            anthropic_api_key=None,
+            jsearch_api_key="synthetic-key",
+            _env_file=None,
+        ),
+    )
+    fresh = job_source.build_provider()
+    assert fresh.remaining_quota is None  # stale cache discarded → probe allowed
+
+
+def test_mid_pagination_429_still_updates_quota_cache():
+    """RapidAPI sends the remaining-quota header on 429s too; the cache
+    must record it so the NEXT refresh refuses instead of retrying."""
+    request_count = 0
+
+    def handler(request):
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            return httpx.Response(
+                200,
+                json=JSEARCH_RESPONSE,
+                headers={"x-ratelimit-requests-remaining": "100"},
+            )
+        return httpx.Response(
+            429, headers={"x-ratelimit-requests-remaining": "0"}
+        )
+
+    provider = mock_provider(handler)
+    results = provider.search("microscopy analyst", None, pages=2)
+    assert results  # page-1 partials kept
+    assert job_source._last_known_remaining == 0  # 429's header recorded

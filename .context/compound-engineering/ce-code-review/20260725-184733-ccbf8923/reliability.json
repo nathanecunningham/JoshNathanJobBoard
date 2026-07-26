@@ -1,0 +1,48 @@
+{
+  "reviewer": "reliability",
+  "findings": [
+    {
+      "title": "Multi-page JSearch fetch discards already-fetched (and already quota-charged) jobs on any non-quota failure",
+      "why_it_matters": "JSearchProvider.search() calls one HTTP request per page inside a single loop (PER_REFRESH_REQUEST_BUDGET=3 pages per refresh). If page 1 succeeds and page 2 hits a transient network error, a 5xx, or a spurious 429, the method raises immediately from inside the loop and the `jobs` list accumulated from page 1 is never returned — it is lost with the function's stack frame. This is inconsistent with the quota-floor branch a few lines above, which explicitly does `if jobs: break` to keep already-paid-for results. The net effect: a single transient failure on page 2 or 3 wastes the JSearch quota already spent on page 1 and returns zero jobs to recommend.refresh(), which then propagates the error as a 502 with no rows inserted — even though valid, already-fetched postings existed in memory. Given JSearch's hard 200/month quota, this quietly burns budget on every transient blip during a multi-page refresh.",
+      "severity": "P2",
+      "file": "backend/app/services/job_source.py",
+      "line": 118,
+      "confidence": 100,
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "In the except/status-code branches (lines 117-129), mirror the quota-floor pattern: if `jobs` is non-empty, break and return the partial results instead of raising; only raise ProviderError/ProviderQuotaError when no pages have succeeded yet. Confirm with the author whether losing partial pages was an intentional simplification before changing behavior.",
+      "evidence": [
+        "backend/app/services/job_source.py:94-138 — the for-page loop accumulates `jobs` across iterations but only the quota-floor check (lines 95-106) preserves already-fetched results via `if jobs: break`; the httpx.HTTPError branch (117-118), the 429 branch (120-125), and the non-200 branch (126-129) all `raise` unconditionally, discarding `jobs` from any prior successful page.",
+        "backend/tests/test_recommendations.py:753-762 and 765-784 — existing tests only cover a first-page failure (test_jsearch_provider_maps_other_failures_to_provider_error) and a first-page quota-floor stop (test_jsearch_provider_stops_paging_at_quota_floor); no test exercises page 1 succeeding then page 2/3 failing, so this partial-loss path is unverified."
+      ]
+    },
+    {
+      "title": "No explicit timeout override on the Anthropic client — a slow/hanging Claude API can block a refresh for tens of minutes per unscored job",
+      "why_it_matters": "_build_client() constructs `anthropic.Anthropic(api_key=...)` with no `timeout=` argument. The installed anthropic SDK (0.120.0, matching backend/uv.lock) defaults non-streaming requests to `Timeout(connect=5.0, read/write/pool=600)` (anthropic._constants.DEFAULT_TIMEOUT, and Anthropic._calculate_nonstreaming_timeout returns the same 600s for max_tokens=1024/16000 used here since neither exceeds the streaming threshold). The SDK also retries up to `max_retries=2` (3 attempts total) with exponential backoff on connection errors, timeouts, 429s, and 5xx. In the worst case a single hanging (not just erroring) Claude response can hold a synchronous request thread for roughly 3 x 600s before recommend.py's `except (ai.AIUnavailableError, ai.AIParseError): pass` lets the refresh move on to the next job. Because recommend.refresh() scores jobs one-by-one in a loop inside a single synchronous POST /recommendations/refresh handler with no overall deadline, a degraded-but-not-down Claude API can make one button press hang for a very long time with no partial feedback, rather than failing fast the way the quota/network paths do for JSearch.",
+      "severity": "P2",
+      "file": "backend/app/services/ai.py",
+      "line": 139,
+      "confidence": 75,
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "suggested_fix": "Pass an explicit, shorter `timeout=` (e.g. `httpx.Timeout(60, connect=5)`) to `anthropic.Anthropic(...)` in _build_client(), similar to the explicit `httpx.Client(timeout=30)` already used in job_source.py, and consider whether `max_retries` should be reduced for the per-job scoring path given recommend.py already tolerates a failed score by inserting the job unscored.",
+      "evidence": [
+        "backend/app/services/ai.py:131-139 — `_build_client()` returns `anthropic.Anthropic(api_key=settings.anthropic_api_key)` with no timeout/max_retries override, called fresh in parse_resume, tailor_sections, and score_job.",
+        "Installed anthropic==0.120.0 (backend/uv.lock:38-40): `anthropic._constants.DEFAULT_TIMEOUT == Timeout(connect=5.0, read=600, write=600, pool=600)`, `DEFAULT_MAX_RETRIES == 2`; `Anthropic._calculate_nonstreaming_timeout` returns this same 600s timeout for the module's max_tokens values (1024, 16000) since neither triggers the >10-minute streaming-required guard.",
+        "backend/app/services/recommend.py:120-135 — score_job is called once per net-new job inside a plain for-loop within the synchronous refresh() function, with no per-job or per-refresh time budget; a failure/timeout is swallowed (`except (ai.AIUnavailableError, ai.AIParseError): pass`) only after the SDK's full timeout+retry cycle completes for that job."
+      ]
+    }
+  ],
+  "residual_risks": [
+    "recommend.refresh() has no overall wall-clock deadline: if several net-new jobs in one refresh all hit a slow/hanging Claude endpoint, the per-job timeout cost (see finding above) compounds across the loop, and the whole POST /recommendations/refresh request could take a very long time before returning, with no incremental progress reported to the caller.",
+    "JobSource quota tracking (job_source.py:131-133) depends entirely on RapidAPI sending the `x-ratelimit-requests-remaining` header on every 200 response; if that header is ever absent for reasons other than a fresh unthrottled key (e.g., a proxy/CDN in front of RapidAPI stripping it), `remaining_quota` stays None and the QUOTA_FLOOR protection silently stops being enforced. This can't be confirmed or denied from the diff alone since it depends on RapidAPI's actual response behavior."
+  ],
+  "testing_gaps": [
+    "No test covers a multi-page JSearch fetch where an earlier page succeeds and a later page fails (network error, 5xx, or 429) — this is the scenario where already-fetched jobs and already-spent quota are silently discarded (see finding above); existing tests only cover single-page failures and single-page quota-floor stops.",
+    "No test exercises the Anthropic client's timeout/retry behavior under a slow or hanging response (e.g., via a stub that delays) to confirm how long POST /recommendations/refresh can actually block before the per-job failure path kicks in."
+  ]
+}

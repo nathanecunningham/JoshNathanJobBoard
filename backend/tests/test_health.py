@@ -15,6 +15,33 @@ def test_health_returns_ok(client):
     assert response.json() == {"status": "ok", "database": "ok"}
 
 
+def test_health_schema_appears_in_openapi(client):
+    """/health declares a response model, so the docs show its shape."""
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "HealthRead" in schemas
+    assert set(schemas["HealthRead"]["properties"]) == {"status", "database"}
+
+
+def test_validation_errors_use_string_detail(client):
+    """Both schema-level and hand-raised 422s return the app-wide
+    ``{"detail": "<string>"}`` shape, not FastAPI's default error list."""
+    # Schema-level: missing required fields on POST /jobs.
+    response = client.post("/jobs", json={"company": "Acme"})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert "position" in detail  # names the offending field
+
+    # Hand-raised: tailoring a job that has no stored description.
+    job_id = client.post(
+        "/jobs", json={"company": "Acme", "position": "Analyst"}
+    ).json()["id"]
+    response = client.post(f"/jobs/{job_id}/tailor", json={"section_ids": [1]})
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)
+    assert "description_override" in response.json()["detail"]
+
+
 def test_app_boots_with_empty_environment(monkeypatch, tmp_path):
     """The app must start with no API keys configured (tracker-only mode)."""
     for var in ("ANTHROPIC_API_KEY", "JSEARCH_API_KEY", "DATABASE_PATH"):

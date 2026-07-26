@@ -20,6 +20,7 @@ from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
 from app.db import get_session
+from app.routers._shared import get_or_404
 from app.models import (
     Comment,
     CommentCreate,
@@ -51,12 +52,6 @@ STATUS_DATE_COLUMNS = {
     JobStatus.accepted: "accepted_at",
 }
 
-
-def get_job_or_404(job_id: int, session: Session) -> Job:
-    job = session.get(Job, job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return job
 
 
 # ---------------------------------------------------------------------------
@@ -165,14 +160,14 @@ def create_job(body: JobCreate, session: Session = Depends(get_session)) -> Job:
 @router.get("/{job_id}", response_model=JobDetail)
 def read_job(job_id: int, session: Session = Depends(get_session)) -> Job:
     """The job plus its nested comments/contacts/links."""
-    return get_job_or_404(job_id, session)
+    return get_or_404(session, Job, job_id, "Job")
 
 
 @router.patch("/{job_id}", response_model=JobRead)
 def update_job(
     job_id: int, body: JobUpdate, session: Session = Depends(get_session)
 ) -> Job:
-    job = get_job_or_404(job_id, session)
+    job = get_or_404(session, Job, job_id, "Job")
     updates = body.model_dump(exclude_unset=True)
     status_changed = "status" in updates and updates["status"] != job.status
 
@@ -207,7 +202,7 @@ def delete_job(job_id: int, session: Session = Depends(get_session)) -> None:
     the dedup set and cause re-fetch/re-score spend — and for jobs whose
     submitted tailored resume records what was actually sent out.
     """
-    job = get_job_or_404(job_id, session)
+    job = get_or_404(session, Job, job_id, "Job")
     if job.source == JobSource.recommended:
         raise HTTPException(
             status_code=409,
@@ -238,7 +233,7 @@ def dismiss_job(job_id: int, session: Session = Depends(get_session)) -> Job:
     posting. Idempotent: dismissing an already-dismissed job keeps the
     original timestamp.
     """
-    job = get_job_or_404(job_id, session)
+    job = get_or_404(session, Job, job_id, "Job")
     if job.dismissed_at is None:
         job.dismissed_at = utcnow()
         job.updated_at = utcnow()
@@ -251,7 +246,7 @@ def dismiss_job(job_id: int, session: Session = Depends(get_session)) -> Job:
 @router.post("/{job_id}/restore", response_model=JobRead)
 def restore_job(job_id: int, session: Session = Depends(get_session)) -> Job:
     """Clear a dismissal — the job reappears in the default list."""
-    job = get_job_or_404(job_id, session)
+    job = get_or_404(session, Job, job_id, "Job")
     if job.dismissed_at is not None:
         job.dismissed_at = None
         job.updated_at = utcnow()
@@ -270,14 +265,14 @@ def restore_job(job_id: int, session: Session = Depends(get_session)) -> Job:
 def list_comments(
     job_id: int, session: Session = Depends(get_session)
 ) -> list[Comment]:
-    return get_job_or_404(job_id, session).comments
+    return get_or_404(session, Job, job_id, "Job").comments
 
 
 @router.post("/{job_id}/comments", response_model=CommentRead, status_code=201)
 def create_comment(
     job_id: int, body: CommentCreate, session: Session = Depends(get_session)
 ) -> Comment:
-    get_job_or_404(job_id, session)
+    get_or_404(session, Job, job_id, "Job")
     comment = Comment(**body.model_dump(), job_id=job_id)
     session.add(comment)
     session.commit()
@@ -289,7 +284,7 @@ def create_comment(
 def delete_comment(
     job_id: int, comment_id: int, session: Session = Depends(get_session)
 ) -> None:
-    get_job_or_404(job_id, session)
+    get_or_404(session, Job, job_id, "Job")
     comment = session.get(Comment, comment_id)
     if comment is None or comment.job_id != job_id:
         raise HTTPException(
@@ -309,14 +304,14 @@ def delete_comment(
 def list_contacts(
     job_id: int, session: Session = Depends(get_session)
 ) -> list[Contact]:
-    return get_job_or_404(job_id, session).contacts
+    return get_or_404(session, Job, job_id, "Job").contacts
 
 
 @router.post("/{job_id}/contacts", response_model=ContactRead, status_code=201)
 def create_contact(
     job_id: int, body: ContactCreate, session: Session = Depends(get_session)
 ) -> Contact:
-    get_job_or_404(job_id, session)
+    get_or_404(session, Job, job_id, "Job")
     contact = Contact(**body.model_dump(), job_id=job_id)
     session.add(contact)
     session.commit()
@@ -328,7 +323,7 @@ def create_contact(
 def delete_contact(
     job_id: int, contact_id: int, session: Session = Depends(get_session)
 ) -> None:
-    get_job_or_404(job_id, session)
+    get_or_404(session, Job, job_id, "Job")
     contact = session.get(Contact, contact_id)
     if contact is None or contact.job_id != job_id:
         raise HTTPException(
@@ -348,14 +343,14 @@ def delete_contact(
 def list_links(
     job_id: int, session: Session = Depends(get_session)
 ) -> list[JobLink]:
-    return get_job_or_404(job_id, session).links
+    return get_or_404(session, Job, job_id, "Job").links
 
 
 @router.post("/{job_id}/links", response_model=JobLinkRead, status_code=201)
 def create_link(
     job_id: int, body: JobLinkCreate, session: Session = Depends(get_session)
 ) -> JobLink:
-    get_job_or_404(job_id, session)
+    get_or_404(session, Job, job_id, "Job")
     link = JobLink(**body.model_dump(), job_id=job_id)
     session.add(link)
     session.commit()
@@ -367,7 +362,7 @@ def create_link(
 def delete_link(
     job_id: int, link_id: int, session: Session = Depends(get_session)
 ) -> None:
-    get_job_or_404(job_id, session)
+    get_or_404(session, Job, job_id, "Job")
     link = session.get(JobLink, link_id)
     if link is None or link.job_id != job_id:
         raise HTTPException(

@@ -1,7 +1,7 @@
 ---
 title: "feat: Backend v1 — thin slices of tracker, resume tailoring, and recommendations"
 type: feat
-status: active
+status: completed
 date: 2026-07-25
 origin: docs/brainstorms/2026-07-25-backend-build-requirements.md
 deepened: 2026-07-25

@@ -60,4 +60,4 @@ Key data-model relationships to preserve whatever the final schema looks like:
 ## Working Agreements
 
 - The UX collaborator owns UI/UX direction; don't restyle or redesign components beyond the scope of the task at hand.
-- Resume content, correspondence, and API keys are personal data — keep them in the local DB / `.env.local`, never committed.
+- Resume content, correspondence, and API keys are personal data — keep them in the local DB / `backend/.env`, never committed.

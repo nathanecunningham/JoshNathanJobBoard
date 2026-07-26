@@ -1,0 +1,91 @@
+{
+  "reviewer": "correctness",
+  "findings": [
+    {
+      "title": "Quota floor never triggers at refresh start: remaining_quota is per-instance and a fresh provider is built per refresh",
+      "severity": "P2",
+      "file": "backend/app/services/job_source.py",
+      "line": 94,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The plan (line 345) and the module docstring promise the refresh 'refuses to spend requests once it would drop below QUOTA_FLOOR ... so the feature degrades loudly instead of going dead for half the month.' But the floor check reads `self.remaining_quota`, which starts as None on every JSearchProvider instance, and `build_provider()` constructs a brand-new instance on every refresh press (recommend.py line 103). Trace: press refresh -> new provider, remaining_quota=None -> page-1 check skipped (None) -> request spent -> header sets remaining_quota=e.g. 15 -> page-2 check fires, but `jobs` is non-empty so it just breaks and the refresh SUCCEEDS with partial results. Next press repeats: 14, 13, ... down to 0 and an eventual hard 429. The ProviderQuotaError refusal path below the floor is unreachable at the start of any real refresh (the test that exercises it, test_jsearch_provider_refuses_outright_below_floor, has to hand-set provider.remaining_quota=5 on a reused instance -- state production never has). Concrete consequence: the promised below-floor refusal never happens; each press silently burns 1+ requests until the quota is fully exhausted, exactly the 'dead for half the month' failure the floor was designed to prevent.",
+      "evidence": [
+        "job_source.py:79 `self.remaining_quota: int | None = None` (fresh per instance)",
+        "job_source.py:95-106 `if (self.remaining_quota is not None and self.remaining_quota < QUOTA_FLOOR): if jobs: break ... raise ProviderQuotaError(...)` -- skipped when None, and after page 1 `jobs` is normally non-empty so it breaks instead of raising",
+        "job_source.py:161-174 `def build_provider() -> JSearchProvider: ... return JSearchProvider(settings.jsearch_api_key)` -- new instance every call",
+        "recommend.py:103-104 `provider = job_source.build_provider(); raw_jobs = provider.search(query, location, PER_REFRESH_REQUEST_BUDGET)`",
+        "tests/test_recommendations.py:788 `provider.remaining_quota = 5  # known from a previous search` -- the only way the refusal fires"
+      ],
+      "suggested_fix": "Persist the last-seen remaining quota across refreshes (module-level cache in job_source.py, or a row in the DB) and seed JSearchProvider.remaining_quota from it in build_provider(), so the page-1 floor check can actually refuse. Alternatively have recommend.refresh persist RefreshSummary.remaining_quota and pass it into the provider."
+    },
+    {
+      "title": "Off-by-one at the quota floor: a request is still spent when exactly QUOTA_FLOOR requests remain",
+      "severity": "P3",
+      "file": "backend/app/services/job_source.py",
+      "line": 97,
+      "confidence": 50,
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "Docstring says the provider 'refuses to spend requests once it would drop below QUOTA_FLOOR'. With remaining_quota == 20 the check `self.remaining_quota < QUOTA_FLOOR` (20 < 20 is False) permits the request, dropping the quota to 19 -- i.e., the spend that takes you below the floor is allowed, contradicting the 'would drop below' wording. Only matters by one request, and the floor is described as '~20', so intent is ambiguous -- hence confidence 50.",
+      "evidence": [
+        "job_source.py:33 `QUOTA_FLOOR = 20`",
+        "job_source.py:96-97 `self.remaining_quota is not None and self.remaining_quota < QUOTA_FLOOR`",
+        "job_source.py:12-13 docstring: 'refuses to spend requests once it would drop below QUOTA_FLOOR'"
+      ],
+      "suggested_fix": "Use `self.remaining_quota <= QUOTA_FLOOR` (or `self.remaining_quota - 1 < QUOTA_FLOOR`) if the 'would drop below' semantics are intended; otherwise reword the docstring/plan note to 'once it is below'."
+    },
+    {
+      "title": "Malformed provider payload escapes as a raw exception (HTTP 500) instead of ProviderError (502)",
+      "severity": "P3",
+      "file": "backend/app/services/job_source.py",
+      "line": 135,
+      "confidence": 50,
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "The error-mapping design routes provider failures to structured 502/429/503 responses (routers/recommendations.py catches job_source.ProviderError and subclasses). But only httpx transport errors and non-200 statuses are wrapped. A 200 response whose body is not JSON raises json.JSONDecodeError at `response.json()`; a data[] item missing 'job_id' raises KeyError at `item[\"job_id\"]`; a salary field with a non-numeric string raises pydantic ValidationError in RawJob. None of these are ProviderError subclasses, so they bubble past the router's except clauses and surface as an unstructured 500 -- violating the plan's 'structured error payloads, never a 500 stack trace' rule for upstream failures. Confidence 50 because it requires JSearch to return a malformed 200 body, which I can't demonstrate from the code alone.",
+      "evidence": [
+        "job_source.py:135 `for item in response.json().get(\"data\", []):` -- json() unguarded",
+        "job_source.py:150 `source_ref=str(item[\"job_id\"])` -- KeyError if absent",
+        "job_source.py:149-158 RawJob(...) -- pydantic ValidationError on bad field types",
+        "routers/recommendations.py:29-36 -- catches only ProfileEmptyError, Provider*Error, AIUnavailableError"
+      ],
+      "suggested_fix": "Wrap the response-body parsing (json() + per-item _parse_job) in try/except (ValueError, KeyError, ValidationError) and re-raise as ProviderError('JSearch returned a malformed response: ...') so the router maps it to 502."
+    },
+    {
+      "title": "Systemic scoring failure (e.g. invalid Anthropic key) is silently swallowed per-job; refresh reports success with everything unscored",
+      "severity": "P3",
+      "file": "backend/app/services/recommend.py",
+      "line": 131,
+      "confidence": 50,
+      "autofix_class": "manual",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "refresh() pre-checks only that anthropic_api_key is non-empty (line 81). If the key is present but invalid/expired, every ai.score_job call raises anthropic.APIError -> AIParseError, which the per-job `except (ai.AIUnavailableError, ai.AIParseError): pass` swallows. Trace: 30 net-new jobs -> 30 failed Claude calls -> refresh returns 200 with inserted=30, unscored=30 and no error signal, after spending the JSearch requests. The per-job catch is deliberate ('one failed score shouldn't fail the refresh'), but it cannot distinguish 'this posting had no description' from 'every single scoring call failed' -- a fallback that masks failure, so the user sees \"no scores\" instead of \"auth is broken\". The unscored count is the only (ambiguous) hint. Design-judgment call, hence 50.",
+      "evidence": [
+        "recommend.py:81 `if not get_settings().anthropic_api_key:` -- presence check only",
+        "recommend.py:131-134 `except (ai.AIUnavailableError, ai.AIParseError): # One failed score shouldn't fail the refresh ... pass`",
+        "recommend.py:176-181 RefreshSummary has no field distinguishing score-failure from missing-description unscored"
+      ],
+      "suggested_fix": "Track scoring failures separately (e.g. a `score_failures` counter, or abort after N consecutive AIParseErrors and surface a warning field in RefreshSummary) so a dead key is visible instead of masquerading as 'unscored'."
+    }
+  ],
+  "residual_risks": [
+    "Editing a SUBMITTED tailored resume's sections is allowed (PATCH /tailored/{id}/sections/{sid} has no is_submitted guard, tailor.py:189-215). Deletion of a submitted copy is refused because it 'records what was actually sent', but content edits mutate that same record. The plan only specifies the delete guard, so this may be intended -- flagging as a design inconsistency, not a bug.",
+    "The IntegrityError race-recovery path in recommend.py (lines 157-173) commits a second time without a further retry; a second concurrent-writer collision between the re-filter and the second commit would surface as an unhandled 500. Vanishingly unlikely for a 2-user local app.",
+    "POST /jobs with status=applied and an explicit `\"applied_at\": null` in the body stamps applied_at=now (create_job checks the value, not fields_set), whereas PATCH honors explicit nulls via exclude_unset. Divergent explicit-null semantics between create and update; harmless in practice since 'applied but date unknown' -> now is reasonable.",
+    "ConfigProfile.pay_min and RawJob.salary_min/salary_max are stored but never used for filtering or scoring in the v1 engine -- consistent with the plan's deferral of query shaping, but users setting pay_min will see no effect."
+  ],
+  "testing_gaps": [
+    "No test exercises the production path where the quota floor should refuse a refresh: test_jsearch_provider_refuses_outright_below_floor hand-sets remaining_quota on a reused provider instance, a state build_provider() can never produce (this is how the P2 finding escaped).",
+    "No test for a malformed 200 provider payload (missing job_id, non-JSON body) reaching the router -- would document the current 500 behavior.",
+    "No test for a present-but-invalid Anthropic key during refresh (all scores fail, refresh still 200)."
+  ]
+}

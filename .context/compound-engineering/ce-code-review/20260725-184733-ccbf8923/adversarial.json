@@ -1,0 +1,193 @@
+{
+  "reviewer": "adversarial",
+  "findings": [
+    {
+      "title": "Cascade: Anthropic outage mid-refresh creates permanently unscored jobs that dedup then locks out of rescoring",
+      "severity": "P2",
+      "file": "backend/app/services/recommend.py",
+      "line": 131,
+      "confidence": 75,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The per-job except swallow at recommend.py:131-134 says jobs are inserted unscored 'so it stays visible and scoreable later' \u2014 but no rescoring path exists anywhere in the codebase. The recommendations router exposes only POST /refresh, and refresh dedups by source_ref/dedup_hash BEFORE scoring (recommend.py:112-114), so once a job row exists it is never scored again. Trigger: Anthropic returns 429/529/overloaded during the scoring loop (30 sequential Haiku calls in one press make a transient rate-limit or outage window realistic \u2014 anthropic.APIError is converted to AIParseError in ai.score_job:294-295 and swallowed per job). Chain: (1) refresh inserts up to ~30 jobs with match_score=NULL; (2) the next refresh press skips all of them as duplicates before any AI spend; (3) the recommendations board shows a batch of unscored rows forever, recoverable only by manual DB surgery or deleting rows the API refuses to delete (DELETE on recommended jobs is 409 by design, jobs.py:211-218). The 'insert unscored' resilience decision and the 'dedup before spend' decision are each correct alone; composed, they make every scoring failure permanent.",
+      "evidence": [
+        "recommend.py:131-134 \u2014 `except (ai.AIUnavailableError, ai.AIParseError): pass` with comment 'scoreable later'",
+        "recommend.py:108-118 \u2014 dedup by source_ref/dedup_hash happens before scoring, so existing rows never reach the scoring loop again",
+        "routers/recommendations.py \u2014 only endpoint is POST /refresh; grep of all routers shows no rescore/score endpoint",
+        "routers/jobs.py:211-218 \u2014 recommended jobs cannot be deleted (409), so the user cannot even purge-and-refetch",
+        "tests/test_recommendations.py:578 covers ONE job failing to score in a refresh; no test covers whole-batch failure or any recovery path"
+      ],
+      "suggested_fix": "Add a rescore path: e.g. have refresh also attempt scoring for existing recommended jobs where match_score IS NULL and description is present, or add POST /recommendations/rescore. Either preserves 'dedup before spend' for already-scored rows."
+    },
+    {
+      "title": "Composition: resume re-import during the tailor Claude call makes the tailor commit violate the base_section_id FK \u2014 500 after AI spend",
+      "severity": "P2",
+      "file": "backend/app/routers/tailor.py",
+      "line": 135,
+      "confidence": 75,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "tailor_resume validates section_ids and loads master_sections (tailor.py:92-101), then makes a Claude call lasting tens of seconds (network deliberately outside the transaction), then inserts TailoredSection rows with base_section_id=section.id (tailor.py:123-134). ON DELETE SET NULL (models.py:380-382) only nullifies rows that already exist at delete time \u2014 it does nothing for an INSERT that references an already-deleted parent. Trigger: while the tailor call is in flight, POST /resume/import/text or /import/pdf commits (_replace_master deletes every ResumeSection, resume.py:78-89). Chain: (1) tailor's commit at line 135 inserts sections referencing deleted resumesection ids; (2) PRAGMA foreign_keys=ON (db.py:21) rejects the insert; (3) uncaught IntegrityError becomes an opaque 500; (4) the Sonnet tailoring spend is wasted and the user sees 'Internal Server Error' with no cause. The window is the full duration of the Claude call, and both actors exist (two-user app, or one user with import and tailor open in two tabs); uvicorn serves sync endpoints from a threadpool so the requests genuinely overlap. Tests cover reimport-AFTER-tailor (test_tailored_copy_fully_renderable_after_master_reimport) but not reimport-DURING-tailor.",
+      "evidence": [
+        "tailor.py:92-101 \u2014 section existence validated before the AI call, never re-checked after",
+        "tailor.py:113 \u2014 ai.tailor_sections network call between validation and write",
+        "tailor.py:126-134 \u2014 TailoredSection(base_section_id=section.id) inserted from the pre-AI snapshot",
+        "resume.py:78-82 \u2014 re-import deletes all ResumeSection rows in its own committed transaction",
+        "db.py:21 \u2014 PRAGMA foreign_keys=ON makes the stale-parent INSERT an IntegrityError",
+        "models.py:380-382 \u2014 ondelete=SET NULL protects existing rows only, not this insert"
+      ],
+      "suggested_fix": "After the AI call, re-verify the selected section ids still exist inside the transaction and either (a) set base_section_id=None for vanished sections (content is already snapshotted in memory, so the copy stays valid), or (b) catch IntegrityError and return a 409 explaining the master changed mid-tailor."
+    },
+    {
+      "title": "Contract mismatch: PATCH /jobs/{id} with an explicit null for company or position hits the NOT NULL constraint \u2014 uncaught 500",
+      "severity": "P2",
+      "file": "backend/app/models.py",
+      "line": 171,
+      "confidence": 100,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "JobUpdate declares `company: str | None = None` and `position: str | None = None` (models.py:171-172) so pydantic accepts explicit JSON nulls, and update_job's exclude_unset dump keeps explicitly-provided nulls and setattrs them onto the row (jobs.py:176-180). Job.company/position are non-nullable columns. Trigger: Nathan's frontend serializes the whole edit-form state and PATCHes `{\"company\": null, ...}` for an untouched/cleared field \u2014 the standard full-object-PATCH pattern. Chain: pydantic validates 200-OK-shaped input \u2192 UPDATE job SET company=NULL \u2192 SQLite NOT NULL violation \u2192 uncaught IntegrityError \u2192 500 instead of a 422, and the session dies mid-request. Every test PATCHes only the fields it intends to change, so the suite never sends an explicit null for a required field.",
+      "evidence": [
+        "models.py:168-178 \u2014 JobUpdate makes every field, including required ones, nullable",
+        "jobs.py:176-180 \u2014 `body.model_dump(exclude_unset=True)` keeps explicit nulls; setattr applies them verbatim",
+        "models.py:106-107 \u2014 company/position are `str` (NOT NULL) on the table",
+        "Same pattern exists in ResumeSectionUpdate + resume.py:193-194 and TailoredSectionUpdate + tailor.py:210-211 (name/content/position null \u2192 NOT NULL 500)"
+      ],
+      "suggested_fix": "In update handlers, reject (422) or skip None values for non-nullable fields \u2014 e.g. a pydantic field_validator on JobUpdate.company/position that forbids None-when-provided, applied likewise to ResumeSectionUpdate and TailoredSectionUpdate."
+    },
+    {
+      "title": "Assumption violation: JSearch response-shape surprises (missing job_id, data:null, non-numeric salary) raise uncaught exceptions \u2014 500 after quota spent, bypassing the ProviderError\u2192502 contract",
+      "severity": "P3",
+      "file": "backend/app/services/job_source.py",
+      "line": 135,
+      "confidence": 50,
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "The error contract is: provider problems become ProviderError subclasses, which the router maps to 502/429/503 (recommendations.py:29-34). But the parsing path can raise exception types outside that contract: (1) `item[\"job_id\"]` (job_source.py:150) raises KeyError if one entry lacks the id; (2) `response.json()` (line 135) raises on a non-JSON 200 body (proxy/error page); (3) `.get(\"data\", [])` returns None if the body is `{\"data\": null}` \u2014 iterating None raises TypeError; (4) a salary field like \"50k\" raises pydantic ValidationError in RawJob. Chain: page-1 request succeeds and spends quota \u2192 one malformed entry \u2192 uncaught exception \u2192 500 to the user, zero jobs inserted, remaining pages never fetched. The refresh is retryable, but each retry against the same bad payload spends another request. Tests parse only a well-formed fixture (test_jsearch_provider_parses_fixture_response).",
+      "evidence": [
+        "job_source.py:135-136 \u2014 response.json() and iteration over .get('data', []) with no shape guard",
+        "job_source.py:150 \u2014 item['job_id'] direct subscript, the only hard-KeyError field",
+        "recommendations.py:29-34 \u2014 router catches only ProviderError/AIUnavailableError; KeyError/TypeError/ValidationError fall through to a 500",
+        "Trigger precondition (JSearch actually emitting such an entry) is plausible but unconfirmed \u2014 hence confidence 50"
+      ],
+      "suggested_fix": "Wrap the per-item parse in try/except (KeyError, ValidationError) that skips or ProviderError-wraps bad entries, and wrap response.json()/data extraction in a ProviderError so the 502 contract holds."
+    },
+    {
+      "title": "Quota governance rests entirely on one optional response header; when it is absent the floor is disabled, and the mid-pagination 429 path then discards results already paid for",
+      "severity": "P3",
+      "file": "backend/app/services/job_source.py",
+      "line": 120,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "remaining_quota only updates when the x-ratelimit-requests-remaining header exists AND isdigit() (job_source.py:131-133). If RapidAPI omits, renames, or formats it unexpectedly (e.g. '-1'), remaining_quota stays None and the QUOTA_FLOOR guard (lines 95-106) never engages \u2014 the app burns toward the hard cap with its only safety mechanism silently off. Then the failure it was meant to prevent arrives asymmetrically: the floor path keeps already-fetched jobs (`if jobs: break`, line 99-100), but the 429 path (lines 120-125) raises unconditionally even when `jobs` is non-empty. Concrete chain: header unparsed all month \u2192 quota hits 0 \u2192 refresh page 1 succeeds (spends the last request? no \u2014 gets data), page 2 returns 429 \u2192 ProviderQuotaError \u2192 router 429 \u2192 page-1 postings are discarded despite quota having been spent on them. The refresh reports failure while the month's final successful request bought nothing.",
+      "evidence": [
+        "job_source.py:131-133 \u2014 header parse is the only quota input; no local request counter exists",
+        "job_source.py:94-106 \u2014 floor check is a no-op while remaining_quota is None",
+        "job_source.py:120-125 \u2014 429 raises even when jobs already fetched, unlike the floor path's `if jobs: break`",
+        "tests only cover: header present and parseable (line 721), 429 on the first page (747), floor with parsed header (765) \u2014 never 429 on page 2+ with results in hand"
+      ],
+      "suggested_fix": "In the 429 branch, mirror the floor branch: `if jobs: break` before raising. Consider a local monthly request counter in the DB as a fallback when the header is absent."
+    },
+    {
+      "title": "Repetition abuse: double-clicking Refresh doubles JSearch and Claude spend \u2014 the DB race is backstopped, the spend is not",
+      "severity": "P3",
+      "file": "backend/app/services/recommend.py",
+      "line": 104,
+      "confidence": 75,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "Refresh is a button in Nathan's UI; a double-click issues two concurrent POST /recommendations/refresh. Both pass the dedup snapshot (taken before network, recommend.py:97-100), so both spend 3 JSearch requests (6 of the monthly 200) and both score the same ~30 postings with Haiku (~60 calls instead of 30). The IntegrityError backstop (lines 157-173) protects only the DB: the loser rolls back, re-filters, and inserts nothing \u2014 all of its network spend was for rows the winner already inserted. test_double_refresh_race_is_caught_by_db_constraint verifies correctness of the DB state, not the doubled spend. Against a hard 200/month cap where the plan budgets 3 per press, every accidental double-press costs an extra press's worth of quota.",
+      "evidence": [
+        "recommend.py:97-104 \u2014 dedup snapshot then fetch; no lock, in-flight flag, or idempotency key anywhere",
+        "recommend.py:120-135 \u2014 loser fully scores its batch before discovering the conflict at commit",
+        "recommend.py:157-173 \u2014 backstop discards the loser's rows after the spend",
+        "tests/test_recommendations.py:371 \u2014 race test asserts row counts only"
+      ],
+      "suggested_fix": "Cheap guard: an in-process refresh lock (threading.Lock or a 'refresh in progress' flag) returning 409/425 for the second press; frontend should also disable the button while in flight."
+    },
+    {
+      "title": "Dedup gap: manually adding a job while a refresh is scoring bypasses both dedup layers \u2014 duplicate rows with no error",
+      "severity": "P3",
+      "file": "backend/app/services/recommend.py",
+      "line": 97,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": true,
+      "pre_existing": false,
+      "why_it_matters": "The dedup snapshot (recommend.py:97-100) is taken before network phases that can run 30-60s (fetch + up to 30 sequential Haiku calls). If the user manually POSTs /jobs for a posting the in-flight refresh also fetched (saw it in an email while waiting), the refresh's commit succeeds: the unique-index backstop only covers source_ref, and the manual row has source_ref NULL (jobs.py:151-155), so no IntegrityError fires and the advisory-hash re-check (lines 161-171) never runs. Result: the same posting appears twice on the board \u2014 one manual, one recommended \u2014 and the recommended twin can't be deleted (409), only dismissed. Tests cover manual-job-then-refresh dedup (test_manual_job_dedups_provider_posting_via_normalized_hash) but only when the manual job exists before the snapshot.",
+      "evidence": [
+        "recommend.py:96-100 \u2014 snapshot comment: taken 'BEFORE network I/O'; scoring window follows",
+        "models.py:122-129 \u2014 unique index is on source_ref only, partial WHERE source_ref IS NOT NULL",
+        "recommend.py:157-173 \u2014 hash re-filter is only reachable via IntegrityError, which a manual row can't trigger",
+        "Timing window is long (whole scoring phase) but requires the user to add the exact same posting during it \u2014 hence 50"
+      ],
+      "suggested_fix": "Re-read existing dedup_hashes inside the final transaction (cheap SELECT) and filter prepared rows against them before add_all, instead of only on the IntegrityError path."
+    },
+    {
+      "title": "Explicit-null date in the same PATCH as a status change silently suppresses the auto-stamp \u2014 applied job with no applied_at",
+      "severity": "P3",
+      "file": "backend/app/routers/jobs.py",
+      "line": 187,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "The 'explicit date wins' rule checks `date_column not in updates` (jobs.py:187), and exclude_unset keeps explicitly-sent nulls. A frontend that PATCHes full form state \u2014 `{\"status\": \"applied\", \"applied_at\": null, ...}` \u2014 takes the status transition but treats null as the explicit winner: applied_at is set to None (line 179-180) and the auto-stamp is skipped. The job lands in status=applied with applied_at NULL, a state the status-date model treats as meaningless, and nothing flags it. The tested cases (test_explicit_date_in_same_patch_wins_over_auto_set, test_patch_to_applied_auto_sets_applied_at) cover explicit real dates and omitted dates, never explicit null. Interacts with the P2 null-for-required finding: the same full-object-PATCH frontend habit triggers both.",
+      "evidence": [
+        "jobs.py:176 \u2014 model_dump(exclude_unset=True) retains explicit nulls in `updates`",
+        "jobs.py:179-180 \u2014 applied_at explicitly set to None before the auto-stamp check",
+        "jobs.py:186-188 \u2014 `date_column not in updates` treats the explicit null as an intentional date"
+      ],
+      "suggested_fix": "Treat an explicit null as 'no explicit date': auto-stamp when `updates.get(date_column) is None` on a status change, or 422 a null date accompanying a status change into that status."
+    },
+    {
+      "title": "Empty-content sections pass the profile gate \u2014 refresh spends 3 JSearch requests and Haiku calls scoring against a profile of bare section names",
+      "severity": "P3",
+      "file": "backend/app/services/recommend.py",
+      "line": 76,
+      "confidence": 50,
+      "autofix_class": "advisory",
+      "owner": "human",
+      "requires_verification": false,
+      "pre_existing": false,
+      "why_it_matters": "ProfileEmptyError guards quota: no profile \u2192 no fetch. But _build_profile renders each section as f\"{name}:\\n{content}\" without filtering empty content (recommend.py:62), while ExperienceSource rows ARE filtered (`if source.content`, line 63). Trigger: the user clears their only section's content via PATCH /resume/sections/{id} (content=\"\" is accepted \u2014 ResumeSectionUpdate has no min_length), or Claude's parse returns a section with empty content (ParsedSection.content has no min_length either). The profile becomes e.g. \"Skills:\\n\" \u2014 truthy \u2014 so the gate passes, and with no config.experience the fallback query becomes the section names themselves (lines 91-93). Chain: 3 JSearch requests spent on the query \"Skills:\", ~30 junk postings fetched, each scored by Haiku against a contentless profile, ~30 meaningless recommended rows inserted that then permanently occupy the dedup set. The whole point of the gate \u2014 never spend quota on a refresh that can't produce signal \u2014 is defeated by whitespace.",
+      "evidence": [
+        "recommend.py:62 \u2014 sections joined without an `if section.content` filter (sources get one at line 63)",
+        "recommend.py:75-80 \u2014 gate is `if not profile`, satisfied by 'Skills:\\n'",
+        "recommend.py:91-93 \u2014 fallback query = first 12 words of that junk profile",
+        "models.py:288-293 / ai.py:40-44 \u2014 neither ResumeSectionUpdate.content nor ParsedSection.content enforces non-empty"
+      ],
+      "suggested_fix": "Filter sections the same way as sources (`if section.content.strip()`) and gate on the filtered result; optionally also strip() the final profile before the emptiness check."
+    }
+  ],
+  "residual_risks": [
+    "Submit-flag race: two concurrent PATCH /tailored/{id} {is_submitted:true} on different copies of one job can leave both submitted (each session loads the other pre-commit as unsubmitted, so no clearing UPDATE is emitted). Millisecond window on a 2-user local app \u2014 noted, not filed.",
+    "ConfigProfile singleton: two concurrent first GET /settings/profile can create two rows; reads/writes consistently target .first() so the second row is inert garbage, but the 'singleton' invariant is unenforced (no unique constraint).",
+    "Timezone-offset datetimes (e.g. applied_at '2026-07-01T12:00:00+09:00') are accepted by pydantic and silently stored with the offset dropped by SQLAlchemy's SQLite bind processing \u2014 a 9-hour skew with no error. Frontends sending Z/UTC are unaffected.",
+    "ConfigProfile.pay_min is stored and returned but never read by the engine, and RawJob.salary_min/max are fetched then discarded (make_job maps neither) \u2014 a user who sets pay_min will still receive below-floor recommendations. Likely a deliberate v1 deferral; confirm it is documented as such.",
+    "The IntegrityError retry path's second commit (recommend.py:173) can itself raise IntegrityError under a triple-overlap of refreshes \u2192 uncaught 500. Requires three concurrent presses; suppressed."
+  ],
+  "testing_gaps": [
+    "No test for HTTP 429 arriving on page 2+ when page 1 already returned jobs (the discard-paid-results path in job_source.search).",
+    "No test for malformed JSearch payloads: entry missing job_id, {\"data\": null}, non-numeric salary fields, non-JSON 200 body.",
+    "No test for a refresh where EVERY scoring call fails (whole-batch Anthropic outage) and no test proving unscored jobs are ever recoverable.",
+    "No test PATCHing explicit JSON nulls: null company/position (NOT NULL 500), or status+null date suppressing the auto-stamp.",
+    "No test for resume re-import committing while a tailor request is between its AI call and its commit (the FK-violation window).",
+    "No test that a refresh header absent/malformed across the whole search leaves the quota floor disabled (only header-present paths are tested)."
+  ]
+}

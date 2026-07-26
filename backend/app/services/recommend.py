@@ -16,6 +16,8 @@ refreshes overlap, the loser's commit raises IntegrityError and the refresh
 re-filters against the fresh DB state instead of failing.
 """
 
+import logging
+
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -32,6 +34,8 @@ from app.models import (
 )
 from app.services import ai, job_source
 from app.services.job_source import RawJob
+
+logger = logging.getLogger(__name__)
 
 # Requests spent per refresh press. ~30 postings; one daily refresh stays
 # well inside JSearch's 200/month cap (see the plan's quota math).
@@ -119,6 +123,7 @@ def refresh(session: Session) -> RefreshSummary:
 
     # --- Network phase 2: score net-new jobs only --------------------------
     prepared: list[tuple[RawJob, str, float | None, str | None]] = []
+    score_failures = 0
     for raw, dedup_hash in net_new:
         score: float | None = None
         rationale: str | None = None
@@ -128,10 +133,13 @@ def refresh(session: Session) -> RefreshSummary:
                     profile, raw.company, raw.position, raw.description
                 )
                 score, rationale = match.score, match.rationale
-            except (ai.AIUnavailableError, ai.AIParseError):
+            except (ai.AIUnavailableError, ai.AIParseError) as exc:
                 # One failed score shouldn't fail the refresh — insert the
                 # job unscored so it stays visible and scoreable later.
-                pass
+                score_failures += 1
+                logger.warning(
+                    "scoring failed for %s: %s", raw.source_ref, exc
+                )
         prepared.append((raw, dedup_hash, score, rationale))
 
     # --- One transaction: insert everything --------------------------------
@@ -176,6 +184,9 @@ def refresh(session: Session) -> RefreshSummary:
     return RefreshSummary(
         inserted=len(to_insert),
         skipped_duplicates=skipped,
+        # Every inserted job without a score, whatever the reason...
         unscored=sum(1 for _, _, score, _ in to_insert if score is None),
+        # ...and how many of the scoring attempts raised (a subset).
+        score_failures=score_failures,
         remaining_quota=provider.remaining_quota,
     )
